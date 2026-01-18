@@ -2,6 +2,7 @@
 import os
 import socket
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -29,43 +30,55 @@ def send_to_socket(cmd):
     except Exception as e:
         print(f"[socket] Error: {e}")
 
+def follow_single_journal(svc):
+    """Follow a single journal in its own thread."""
+    cmd = ["journalctl", "--user", "-u", svc, "-f", "-n", "0"]
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    
+    try:
+        while True:
+            line = p.stdout.readline()
+            if not line:
+                break
+            
+            l = line.lower()
+            # Filter and translate relevant events to simple commands
+            if "detected wake word" in l or "voice_assistant_stt_start" in l:
+                send_to_socket("listening")
+            elif "voice_assistant_stt_end" in l:
+                send_to_socket("processing")
+            elif "playing http" in l:
+                send_to_socket("responding")
+            elif "tts response finished" in l:
+                send_to_socket("idle")
+            elif "assistant mute changed: true" in l:
+                print(f"[debug] {svc}: Assistant mute changed: True. Sending 'mute' to neopixel.")
+                send_to_socket("mute")
+            elif "assistant mute changed: false" in l:
+                print(f"[debug] {svc}: Assistant mute changed: False. Sending 'idle' to neopixel.")
+                send_to_socket("idle")
+    except Exception as e:
+        print(f"[error] Thread for {svc} failed: {e}")
+    finally:
+        p.terminate()
+        p.wait()
+
 def follow_journals():
     service_names = get_lva_service_names()
     print("Following journals for:", service_names)
-    procs = []
+    
+    threads = []
     for svc in service_names:
-        cmd = ["journalctl", "--user", "-u", svc, "-f", "-n", "0"]
-        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        procs.append((svc, p))
+        t = threading.Thread(target=follow_single_journal, args=(svc,), daemon=True)
+        t.start()
+        threads.append(t)
+    
     try:
+        # Keep main thread alive
         while True:
-            for svc, p in procs:
-                line = p.stdout.readline()
-                if line:
-                    l = line.lower()
-                    # Filter and translate relevant events to simple commands
-                    if "detected wake word" in l or "voice_assistant_stt_start" in l:
-                        send_to_socket("listening")
-                    elif "voice_assistant_stt_end" in l:
-                        send_to_socket("processing")
-                    elif "playing http" in l:
-                        send_to_socket("responding")
-                    elif "tts response finished" in l:
-                        send_to_socket("idle")
-                    elif "assistant mute changed: true" in l:
-                        print("[debug] Assistant mute changed: True. Sending 'mute' to neopixel.")
-                        send_to_socket("mute")
-                    elif "assistant mute changed: false" in l:
-                        print("[debug] Assistant mute changed: False. Sending 'idle' to neopixel.")
-                        send_to_socket("idle")
-            time.sleep(0.01)
+            time.sleep(1)
     except KeyboardInterrupt:
         print("Stopping journal followers...")
-        for _, p in procs:
-            p.terminate()
-        for _, p in procs:
-            p.wait()
-        print("All journal followers stopped.")
 
 def main():
     print("LVA monitor started. Ctrl+C to exit.")
