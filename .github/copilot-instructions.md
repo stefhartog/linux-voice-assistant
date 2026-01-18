@@ -3,33 +3,42 @@
 ## Project Overview
 A multi-instance Linux voice satellite for Home Assistant using the ESPHome protocol. Supports wake words, announcements, timers, and conversations through Home Assistant's voice pipeline. Designed to run as systemd services on servers and Raspberry Pi devices.
 
+**Key repo**: github.com/OHF-Voice/linux-voice-assistant | **Status**: Alpha (v1.0.0)
+
 ## Architecture
 
 ### Core Components
-- **`satellite.py`**: Main `VoiceSatelliteProtocol` class (inherits from `APIServer`) implementing ESPHome server protocol. Handles voice events, audio streaming, TTS playback, wake word management, and timer events. Includes Raspberry Pi-specific LED control for visual feedback during voice interactions.
-- **`api_server.py`**: Base `APIServer` class implementing ESPHome network protocol (packet parsing, message handling, protobuf serialization, authentication). Provides `handle_message()` abstract method for subclasses.
-- **`__main__.py`**: Entry point with CLI parsing, wake word discovery from filesystem, preferences loading with migration support, audio device enumeration, and asyncio event loop setup. Runnable as module: `python -m linux_voice_assistant --name Test`
-- **`mpv_player.py`**: `MpvMediaPlayer` wrapper using python-mpv for audio playback with automatic music ducking (lowers volume during announcements). Manages playlists and done callbacks.
-- **`entity.py`**: ESPHome entities exposed to Home Assistant (`MediaPlayerEntity` for audio control, `TextAttributeEntity` for displaying active STT/TTS/assistant text in HA UI).
-- **`models.py`**: Data classes for preferences (`Preferences`, `GlobalPreferences`), wake words (`AvailableWakeWord`, `WakeWordType`), and runtime state (`ServerState` - central state container passed through the app).
+- **`satellite.py`** (~680 lines): Main `VoiceSatelliteProtocol` class inheriting `APIServer`. Implements ESPHome server protocol: handles voice events/audio streaming/TTS playback/wake word management/timer events.
+- **`api_server.py`** (~180 lines): Base `APIServer(asyncio.Protocol)` implementing ESPHome network protocol. Handles packet parsing, protobuf serialization, HelloRequest/Authentication/PingRequest. Provides abstract `handle_message()` for subclasses. Core packet loop in `data_received()`.
+- **`__main__.py`** (~580 lines): Entry point with CLI parsing (argparse), wake word filesystem discovery, preferences loading/migration, audio device enumeration (soundcard), and asyncio event loop setup. Runs audio capture in background thread. Runnable as `python -m linux_voice_assistant --name Test`.
+- **`mpv_player.py`**: `MpvMediaPlayer` wrapper around python-mpv. Handles audio playback, music ducking (pauses music during announcements), playlist management, and done callbacks.
+- **`entity.py`** (~230 lines): ESPHome entities exposed to HA: `MediaPlayerEntity` (audio control + ducking logic), `TextAttributeEntity` (displays active STT/TTS/assistant text), `SwitchEntity` (toggles—e.g., software mute). Base `ESPHomeEntity` class with abstract `handle_message()` method.
+- **`models.py`**: Dataclasses: `Preferences` (per-instance, minimal—just active wake word list), `GlobalPreferences` (shared HA settings), `ServerState` (central mutable container passed through entire app), `AvailableWakeWord` (wake word metadata + dynamic loader), `WakeWordType` enum (micro/openWakeWord).
 - **`zeroconf.py`**: Zeroconf/mDNS service discovery for automatic Home Assistant detection.
-- **`script/*`**: Zero-dependency Python scripts (not shell scripts) for deployment, management, and development. All executable with `#!/usr/bin/env python3`.
+- **`util.py`**: Helper utilities (e.g., `call_all()` for chaining callbacks).
+- **`script/*`**: Zero-dependency Python executables (not shell) for deployment/management/development. All use `#!/usr/bin/env python3`. Key scripts: `run` (dev foreground), `deploy` (systemd installation), `setup` (venv + deps), `status`/`stop`/`restart`/`remove` (instance management), `test`/`lint`/`format` (dev tools).
 
 ### Data Flow
-1. Audio captured from microphone → wake word detection (pymicro-wakeword/pyopen-wakeword)
-2. On wake → `VoiceAssistantAudio` messages stream audio chunks to Home Assistant via ESPHome protocol
-3. Home Assistant processes STT/intent/TTS → sends back `VoiceAssistantEventResponse` events and audio URL
-4. TTS audio downloaded and played via mpv, with music ducking if media player is active
-5. Events trigger visual feedback on Raspberry Pi (LED control via `/sys/class/leds/PWR/trigger`)
+1. **Audio input**: Captured from microphone (16kHz mono) in background thread → pushed to `ServerState.audio_queue`
+2. **Wake word detection**: Async task monitors queue, runs loaded `MicroWakeWord`/`OpenWakeWord` detectors, triggers voice event on match
+3. **Audio streaming**: On wake, `VoiceAssistantAudio` protobuf messages stream audio chunks to Home Assistant via ESPHome protocol
+4. **HA processing**: Home Assistant's voice pipeline processes audio (STT→intent→TTS), returns `VoiceAssistantEventResponse` messages + TTS audio URL
+5. **Playback & Ducking**: TTS audio downloaded via `urllib`, played via mpv's `announce_player`. If `music_player` is active, it's paused during announcement, resumed on completion
+6. **Visual feedback**: Can be provided via neopixel LED ring (optional supplementary service)
 
 ### Script System Architecture
-All scripts in `script/` are **Python executables** (not shell scripts) with zero external dependencies beyond stdlib. Key design principles:
-- **Self-contained**: Parse CLI args, read/write JSON configs, manage systemd services, all without imports from the main package
-- **Venv-aware**: Auto-detect `.venv/` and use appropriate Python interpreter (see [script/run](script/run#L51-L53))
-- **Template cascade**: `script/run` and `script/deploy` use intelligent defaults (user → OS-specific → main) via `_choose_template()` function
+All scripts in `script/` are **Python executables** (not shell scripts) with zero external dependencies beyond stdlib (except `distro` which is optional). Key design principles:
+
+- **Self-contained**: Parse CLI args, read/write JSON configs, manage systemd services entirely within script—no imports from main package
+- **Venv-aware**: Auto-detect `.venv/` and use appropriate Python interpreter (see [script/run#L51-L53](script/run#L51-L53))
+- **Template cascade**: `script/run` and `script/deploy` use intelligent template defaults via `_choose_template()` function:
+  1. User custom default (`default_user_cli.json` - allows overriding project defaults)
+  2. OS-specific default (`default_wsl_cli.json` for WSL, etc.)
+  3. Main fallback (`default_cli.json`)
 - **Auto-assignment**: Ports (starting from 6053, or `LVAS_BASE_PORT` env var) and MAC addresses (via `uuid.getnode()`) auto-generated if not specified
-- **Preference migration**: Legacy single-file preferences automatically split into per-instance + global on first run
-- **Systemd integration**: `script/deploy` enables user linger and installs services in `~/.config/systemd/user/`
+- **Preference migration**: Legacy single-file preferences automatically split into per-instance + global on first run (see [__main__.py#L280-L320](__main__.py#L280-L320))
+- **Systemd integration**: `script/deploy` enables user linger (via `loginctl enable-linger`) so services persist across logouts/reboots, installs units in `~/.config/systemd/user/`
+- **Venv activation**: Scripts auto-activate `.venv/` if present, fall back to system Python with warnings
 
 ## Multi-Instance Configuration
 
@@ -99,11 +108,11 @@ script/lint               # black --check, isort --check, flake8, pylint, mypy
 ### Async/Event-Driven Architecture
 The entire app runs on a single asyncio event loop initialized in [__main__.py](linux_voice_assistant/__main__.py#L350). The event loop manages:
 - **Audio capture**: Runs in separate thread pushing audio chunks to `ServerState.audio_queue`
-- **Wake word detection**: Monitors queue in async task, triggers voice events
-- **ESPHome server**: `APIServer` (asyncio.Protocol) receives/sends protobuf messages
+- **Wake word detection**: Async task monitors queue, triggers voice events when wake word detected
+- **ESPHome server**: `APIServer` (asyncio.Protocol) receives/sends protobuf messages over TCP (port configured per instance)
 - **TTS/Announcements**: Non-blocking playback with callbacks via mpv
 
-The event loop is accessible via `asyncio.get_running_loop()` and stored in `VoiceSatelliteProtocol._loop` for scheduling coroutines.
+The event loop is accessible via `asyncio.get_running_loop()` and stored in `VoiceSatelliteProtocol._loop` for scheduling coroutines from synchronous `handle_message()` methods (see Music Ducking pattern below for example).
 
 ### State Management (ServerState)
 `ServerState` (in [models.py](linux_voice_assistant/models.py#L70-L99)) is the central mutable state container passed through the entire app. Contains:
@@ -133,10 +142,10 @@ elif isinstance(msg, VoiceAssistantRequest):
 ### Entity Pattern
 Entities inherit from `ESPHomeEntity` and are registered in `ServerState.entities`. Key subclasses:
 - **MediaPlayerEntity**: Exposes music/TTS playback control, handles ducking for announcements
-- **TextAttributeEntity**: Displays active STT/TTS/assistant text in HA UI
+- **TextAttributeEntity**: Displays active STT/TTS/assistant text in HA UI (read-only in HA)
 - **SwitchEntity**: Handles toggle switches (e.g., for software mute)
 
-Each entity registers in `ListEntitiesResponse` with unique `key` and `object_id`. See [entity.py](linux_voice_assistant/entity.py#L35-L150) for implementation pattern.
+Each entity registers in `ListEntitiesResponse` with unique `key` and `object_id`. Entities implement `handle_message()` that returns iterable of protobuf response messages. See [entity.py](linux_voice_assistant/entity.py#L25-L232) for implementation patterns.
 
 ### Wake Word Loading
 Wake words discovered from `wakewords/` subdirectories by scanning `*.json` config files. Two types:
@@ -166,13 +175,8 @@ Communication uses protobuf messages from `aioesphomeapi.api_pb2`. Key messages:
 
 Message handling flow: [api_server.py](linux_voice_assistant/api_server.py#L47-L78) `process_packet()` → `handle_message()` (implemented in [satellite.py](linux_voice_assistant/satellite.py)) → `send_messages()`.
 
-### Raspberry Pi LED Feedback
-On Raspberry Pi hardware, visual feedback provided via power LED:
-- **Idle**: LED off (`none` trigger)
-- **Listening**: LED solid on (`default-on` trigger)
-- **Processing**: LED heartbeat pattern (`heartbeat` trigger)
-
-Detection via `/proc/device-tree/model` or `/proc/cpuinfo`. LED control in [satellite.py](linux_voice_assistant/satellite.py#L56-L99) `_set_led()` function.
+### Raspberry Pi Integration
+Visual feedback for Raspberry Pi systems is provided via the optional Neopixel LED Ring supplementary service (see **Supplementary Services** section below). This monitors systemd journals for LVA events and drives animations on the LED ring via socket commands.
 
 ### Music Ducking (Auto-Volume Control)
 When announcements play, music volume is automatically lowered. Implementation in [entity.py](linux_voice_assistant/entity.py#L60-L75): checks `music_player.is_playing`, pauses it, plays announcement via `announce_player`, resumes music on done callback. Separate players allow concurrent state tracking.
@@ -187,6 +191,21 @@ When announcements play, music volume is automatically lowered. Implementation i
 - Conversation history logged to `lvas_log` (symlinked to `/dev/shm/lvas_log` for RAM-based logging to reduce disk wear)
 - History synced to HA via REST API if `ha_token` and `ha_history_entity` configured in `ha_settings.json`
 - Log entries formatted as "User: {stt_text}" and "{assistant_name}: {tts_text}"
+
+### Supplementary Services (Optional)
+**Neopixel LED Ring** (`neopixel/` directory) - Visual feedback system separate from main satellite:
+- **`neopixel_patterns.py`**: Neopixel ring controller with breathing/pulsing effects, socket-based command interface (`/tmp/neopixel.sock`)
+- **`neopixel_lva_monitor.py`**: Monitors systemd journals for LVA events (wake word, STT, intent, TTS, mute changes) and sends commands to neopixel ring via socket
+- **Systemd services**: `neopixel_patterns.service` (ring controller) and `neopixel_lva_monitor.service` (event monitor)
+- **Event mapping**: Journal log patterns → neopixel commands (`listening`, `processing`, `responding`, `idle`, `mute`)
+
+**Startup Helper** (`lvas_startup/` directory) - Kiosk/desktop integration:
+- **`lvas_kiosk.desktop`**: Desktop entry for automatic startup on login
+- **`lvas_launch.sh`**: Wrapper script to start satellite with systemd integration
+- **`lvas-startup-helper.service`**: Systemd service for auto-launching satellites on multiuser systems
+
+**Squeezelite Integration** (`Squeezelite/` directory) - Music streaming compatibility:
+- Setup scripts for Squeezelite (lightweight LMS player) integration with audio ducking
 
 ## Dependencies
 - **aioesphomeapi**: ESPHome API protocol implementation

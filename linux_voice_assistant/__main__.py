@@ -487,7 +487,19 @@ def process_audio(state: ServerState, mic, block_size: int):
                                     desired,
                                     state.software_mute,
                                 )
+
+                                # Mirror HA switch behavior: update the on_change callback so logs emit
+                                # "Assistant mute changed" (consumed by neopixel_lva_monitor) and keep
+                                # the software_mute flag in sync. SwitchEntity.set_state does not call
+                                # on_change, so we invoke it explicitly before broadcasting state.
+                                if state.mute_entity is not None and state.mute_entity.on_change is not None:
+                                    try:
+                                        state.mute_entity.on_change(desired)
+                                    except Exception:
+                                        _LOGGER.debug("Mute on_change handler failed", exc_info=True)
+
                                 state.software_mute = desired
+
                                 if state.mute_entity is not None and state.satellite is not None:
                                     state.satellite.send_messages([
                                         state.mute_entity.set_state(desired)

@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Rotary encoder volume control for default PulseAudio sink."""
+
+import subprocess
+import threading
+import time
+import sys
+
+try:
+    import RPi.GPIO as GPIO
+except ImportError:
+    print("Error: RPi.GPIO not installed. Install with: sudo apt install python3-rpi.gpio")
+    sys.exit(1)
+
+# Rotary encoder GPIO pins
+CLK = 24  # Rotary encoder pin A (CLK)
+DT = 25   # Rotary encoder pin B (DT)
+SW = 27   # Switch/button (optional for mute)
+
+VOLUME_STEP = 2  # Percentage per rotation step
+DEBOUNCE_TIME = 0.2  # Seconds
+NEOPIXEL_SOCKET = "/tmp/neopixel.sock"
+
+clk_last_state = None
+rotary_lock = threading.Lock()
+running = True
+
+
+def send_neopixel_command(cmd: str) -> None:
+    """Send command to neopixel socket."""
+    try:
+        import socket
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect(NEOPIXEL_SOCKET)
+        sock.sendall(cmd.encode("utf-8"))
+        sock.close()
+    except Exception as e:
+        # Silently fail - neopixel service might not be running
+        pass
+
+
+def get_volume() -> int:
+    """Get current volume of default sink (0-100)."""
+    try:
+        result = subprocess.run(
+            ["pactl", "get-sink-volume", "@DEFAULT_SINK@"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        # Output like: "Volume: front-left: 50000 / 100%  front-right: 50000 / 100%"
+        # Extract percentage
+        for part in result.stdout.split():
+            if "%" in part:
+                return int(part.rstrip("%"))
+        return 0
+    except Exception as e:
+        print(f"Error getting volume: {e}")
+        return 0
+
+
+def set_volume(volume: int) -> None:
+    """Set volume of default sink (0-100)."""
+    volume = max(0, min(100, volume))  # Clamp to 0-100
+    try:
+        subprocess.run(
+            ["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{volume}%"],
+            capture_output=True,
+            check=True,
+        )
+        print(f"Volume: {volume}%")
+        # Update neopixel visualization
+        send_neopixel_command(f"volume {volume}")
+    except Exception as e:
+        print(f"Error setting volume: {e}")
+
+
+def toggle_mute() -> None:
+    """Toggle mute on default sink."""
+    try:
+        subprocess.run(
+            ["pactl", "set-sink-mute", "@DEFAULT_SINK@", "toggle"],
+            capture_output=True,
+            check=True,
+        )
+        is_muted = subprocess.run(
+            ["pactl", "get-sink-mute", "@DEFAULT_SINK@"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        mute_state = is_muted.stdout.strip()
+        print(f"Mute: {mute_state}")
+    except Exception as e:
+        print(f"Error toggling mute: {e}")
+
+
+def rotary_listener() -> None:
+    """Listen to rotary encoder and adjust volume."""
+    global clk_last_state, running
+
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setup(CLK, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.setup(DT, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.setup(SW, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+    clk_last_state = GPIO.input(CLK)
+    sw_last_state = GPIO.input(SW)
+    last_sw_time = 0
+
+    print("Rotary encoder volume control active. Rotate to adjust volume, press button to mute.")
+
+    try:
+        while running:
+            clk_state = GPIO.input(CLK)
+            dt_state = GPIO.input(DT)
+            sw_state = GPIO.input(SW)
+
+            # Detect rotation on falling edge of CLK
+            if clk_last_state == 1 and clk_state == 0:
+                current_volume = get_volume()
+                # Determine direction based on DT state
+                if dt_state != clk_state:
+                    # Clockwise - increase volume
+                    new_volume = current_volume + VOLUME_STEP
+                else:
+                    # Counter-clockwise - decrease volume
+                    new_volume = current_volume - VOLUME_STEP
+
+                with rotary_lock:
+                    set_volume(new_volume)
+
+            clk_last_state = clk_state
+
+            # Button press - toggle mute
+            if sw_state == 0 and sw_last_state == 1:
+                now = time.time()
+                if now - last_sw_time > DEBOUNCE_TIME:
+                    with rotary_lock:
+                        toggle_mute()
+                    last_sw_time = now
+
+            sw_last_state = sw_state
+            time.sleep(0.01)
+
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+    finally:
+        GPIO.cleanup()
+        running = False
+
+
+def main() -> None:
+    """Main entry point."""
+    global running
+    try:
+        rotary_listener()
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+    finally:
+        running = False
+
+
+if __name__ == "__main__":
+    main()

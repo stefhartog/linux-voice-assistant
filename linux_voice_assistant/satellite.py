@@ -53,41 +53,6 @@ from .util import call_all
 _LOGGER = logging.getLogger(__name__)
 
 
-def _is_raspberry_pi() -> bool:
-    """Detect if running on Raspberry Pi hardware."""
-    try:
-        # Check device tree model for Raspberry Pi signature
-        with open("/proc/device-tree/model", "r", encoding="utf-8") as f:
-            model = f.read().strip()
-            if "Raspberry Pi" in model:
-                return True
-    except Exception:
-        pass
-    
-    # Fallback: check for Raspberry Pi in cpuinfo
-    try:
-        with open("/proc/cpuinfo", "r", encoding="utf-8") as f:
-            cpuinfo = f.read()
-            if "Raspberry Pi" in cpuinfo:
-                return True
-    except Exception:
-        pass
-    
-    return False
-
-
-def _set_led(trigger: str) -> None:
-    """Set the Raspberry Pi power LED state.
-    
-    Args:
-        trigger: LED trigger state ('none', 'default-on', 'heartbeat', etc.)
-    
-    Only runs on Raspberry Pi systems.
-    """
-    # LED control removed: sudo tee to /sys/class/leds/PWR/trigger is not safe in service context
-    return
-
-
 def _set_screen_dpms(timeout: int, display: str = ":0") -> None:
     """Set screen DPMS timeout using xset.
     
@@ -208,13 +173,9 @@ class VoiceSatelliteProtocol(APIServer):
         self._timer_finished = False
         self._external_wake_words: Dict[str, VoiceAssistantExternalWakeWord] = {}
         self._current_assistant_name: str = "Assistant"
-        self._is_rpi = _is_raspberry_pi()
         self._screen_management_timeout = state.screen_management
         
         _LOGGER.info("Screen management timeout: %d seconds", self._screen_management_timeout)
-        # Set LED to idle state on init (only on RPi)
-        if self._is_rpi:
-            _set_led("none")
 
 
     def handle_voice_event(
@@ -233,15 +194,11 @@ class VoiceSatelliteProtocol(APIServer):
             self._continue_conversation = False
             self._update_active_stt("")
             self._update_active_tts("")
-            if self._is_rpi:
-                _set_led("default-on")  # Listening
             if self._screen_management_timeout > 0:
                 _LOGGER.info("Waking screen for voice interaction")
                 _set_screen_dpms(0)  # Wake screen immediately
         elif event_type == VoiceAssistantEventType.VOICE_ASSISTANT_STT_START:
             self._update_active_stt("")
-            if self._is_rpi:
-                _set_led("heartbeat")  # Processing speech
         elif event_type == VoiceAssistantEventType.VOICE_ASSISTANT_STT_VAD_START:
             self._update_active_stt("")
         elif event_type == VoiceAssistantEventType.VOICE_ASSISTANT_STT_VAD_END:
@@ -264,8 +221,6 @@ class VoiceSatelliteProtocol(APIServer):
             self._update_active_tts(tts_text)
             self._log_to_file(f"{self._current_assistant_name}: {tts_text}")
             self._sync_history_to_ha()
-            if self._is_rpi:
-                _set_led("default-on")  # Responding with TTS
         elif event_type == VoiceAssistantEventType.VOICE_ASSISTANT_TTS_END:
             self._tts_url = data.get("url")
             self.play_tts()
@@ -275,8 +230,6 @@ class VoiceSatelliteProtocol(APIServer):
                 self._tts_finished()
 
             self._tts_played = False
-            if self._is_rpi:
-                _set_led("default-on")  # Back to idle
 
         # TODO: handle error
 
@@ -500,13 +453,9 @@ class VoiceSatelliteProtocol(APIServer):
             self.state.tts_player.play(self.state.wakeup_sound)
             self.send_messages([VoiceAssistantRequest(start=True)])
             self._is_streaming_audio = True
-            if self._is_rpi:
-                _set_led("default-on")  # Back to listening
             _LOGGER.debug("Continuing conversation")
         else:
             self.unduck()
-            if self._is_rpi:
-                _set_led("none")  # Back to idle
             if self._screen_management_timeout > 0:
                 _LOGGER.info("Setting screen sleep timeout to %d seconds", self._screen_management_timeout)
                 _set_screen_dpms(self._screen_management_timeout)
@@ -540,8 +489,6 @@ class VoiceSatelliteProtocol(APIServer):
     def connection_lost(self, exc):
         super().connection_lost(exc)
         _LOGGER.info("Disconnected from Home Assistant")
-        if self._is_rpi:
-            _set_led("none")  # LED off when disconnected or idle
 
     def _update_active_tts(self, text: str) -> None:
         if self.state.active_tts_entity is None:

@@ -1,5 +1,5 @@
+#!/usr/bin/env python3
 import os
-import glob
 import socket
 import subprocess
 import time
@@ -46,9 +46,9 @@ def follow_journals():
                     # Filter and translate relevant events to simple commands
                     if "detected wake word" in l or "voice_assistant_stt_start" in l:
                         send_to_socket("listening")
-                    elif "voice_assistant_intent_start" in l:
+                    elif "voice_assistant_stt_end" in l:
                         send_to_socket("processing")
-                    elif "voice_assistant_tts_start" in l:
+                    elif "playing http" in l:
                         send_to_socket("responding")
                     elif "tts response finished" in l:
                         send_to_socket("idle")
@@ -58,7 +58,7 @@ def follow_journals():
                     elif "assistant mute changed: false" in l:
                         print("[debug] Assistant mute changed: False. Sending 'idle' to neopixel.")
                         send_to_socket("idle")
-            time.sleep(0.1)
+            time.sleep(0.01)
     except KeyboardInterrupt:
         print("Stopping journal followers...")
         for _, p in procs:
@@ -66,6 +66,13 @@ def follow_journals():
         for _, p in procs:
             p.wait()
         print("All journal followers stopped.")
+
+def main():
+    print("LVA monitor started. Ctrl+C to exit.")
+    follow_journals()
+
+if __name__ == "__main__":
+    main()
 
 def main():
     print("LVA monitor started. Ctrl+C to exit.")

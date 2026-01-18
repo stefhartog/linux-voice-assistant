@@ -1,0 +1,13 @@
+[Unit]
+Description=Rotary Encoder Volume Control
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/sudo PULSE_SERVER=unix:/run/user/1000/pulse/native /usr/bin/python3 /home/stef/linux-voice-assistant/neopixel/rotary_volume.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

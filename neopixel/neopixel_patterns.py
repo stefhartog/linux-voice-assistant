@@ -10,6 +10,7 @@ import threading
 NUM_PIXELS = 8
 PIXEL_PIN = board.D18
 BRIGHTNESS = 0.1
+MIN_BREATHE_FACTOR = 0.1  # Minimum brightness factor during breathing to avoid fully off
 
 COLOR_PRESETS = [
     (255, 0, 0),    # Red
@@ -26,12 +27,22 @@ color_index = 0
 brightness = BRIGHTNESS
 running = True
 
+# Volume bar state
+volume_display_active = False
+volume_display_end_time = 0
+last_volume = 0
+saved_pattern_index = 0
+saved_color_index = 0
+volume_bar_drawn = False
+
 def breathing(color):
     print(f"[debug] Entered breathing with color={color}")
     for b in list(range(0, 256, 4)) + list(range(255, -1, -4)):
         if pattern_index != 0 or not running or color != COLOR_PRESETS[color_index]:
             return
         factor = b / 255.0
+        if factor < MIN_BREATHE_FACTOR:
+            factor = MIN_BREATHE_FACTOR
         c = tuple(int(x * factor) for x in color)
         pixels.brightness = brightness
         pixels.fill(c)
@@ -117,11 +128,50 @@ def ripple(color):
                 pixels[i - j] = c
             time.sleep(0.07)
 
+def volume_bar(volume_percent):
+    """Display volume as a bar (filled LEDs from 0-100%).
+    
+    Args:
+        volume_percent: Volume level 0-100
+    """
+    vol = max(0, min(100, volume_percent))
+    num_lit = int((vol / 100.0) * NUM_PIXELS)
+    
+    # Solid cyan color
+    color = (0, 255, 255)
+    
+    # Fill LEDs from left to right based on volume, respecting global brightness
+    global brightness
+    pixels.brightness = brightness
+    pixels.fill((0, 0, 0))  # Clear first
+    for i in range(num_lit):
+        pixels[i] = color
+    pixels.show()
+
+
 def pattern_runner():
     global pattern_index, color_index, running
     global brightness
+    global volume_display_active, volume_display_end_time, last_volume
+    global saved_pattern_index, saved_color_index, volume_bar_drawn
     last_pat = last_col = None
     while running:
+        # Check if volume display timer expired
+        if volume_display_active and time.time() >= volume_display_end_time:
+            volume_display_active = False
+            volume_bar_drawn = False
+            pattern_index = saved_pattern_index
+            color_index = saved_color_index
+            print(f"[debug] Volume display timeout - returning to pattern {pattern_index}")
+        
+        # If volume display is active, show it once then just wait
+        if volume_display_active:
+            if not volume_bar_drawn:
+                volume_bar(last_volume)
+                volume_bar_drawn = True
+            time.sleep(0.05)
+            continue
+        
         color = COLOR_PRESETS[color_index]
         pixels.brightness = brightness
         pat_idx = pattern_index
@@ -156,6 +206,8 @@ def main():
 
     def socket_listener():
         global pattern_index, color_index
+        global volume_display_active, volume_display_end_time, last_volume
+        global saved_pattern_index, saved_color_index, volume_bar_drawn
         import traceback
         try:
             if os.path.exists(SOCKET_PATH):
@@ -210,6 +262,21 @@ def main():
                             pixels.fill((0,0,0))
                             pixels.show()
                             print(f"[debug] socket_listener set pattern_index=-1 (idle)")
+                        elif cmd.startswith("volume"):
+                            # Format: "volume 50" for 50%
+                            try:
+                                vol = int(cmd.split()[1])
+                                # Save current pattern if not already in volume display mode
+                                if not volume_display_active:
+                                    saved_pattern_index = pattern_index
+                                    saved_color_index = color_index
+                                last_volume = vol
+                                volume_display_active = True
+                                volume_bar_drawn = False  # Force redraw
+                                volume_display_end_time = time.time() + 1.0  # Show for 1 second
+                                print(f"[debug] socket_listener set volume bar to {vol}% (will timeout at {volume_display_end_time})")
+                            except Exception as e:
+                                print(f"[debug] Error parsing volume command: {e}")
                         elif cmd.startswith("preset"):
                             try:
                                 idx = int(cmd.split()[1])
