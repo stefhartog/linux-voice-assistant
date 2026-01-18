@@ -38,6 +38,14 @@ _SOUNDS_DIR = _REPO_DIR / "sounds"
 
 
 async def main() -> None:
+
+    # Define a callback for mute switch changes
+    def on_mute_change(new_state: bool):
+        if new_state:
+            _LOGGER.debug("Microphone muted via switch.")
+        else:
+            _LOGGER.debug("Microphone unmuted via switch.")
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--name", required=True)
     parser.add_argument(
@@ -389,6 +397,10 @@ async def main() -> None:
         disable_wakeword_during_tts=args.disable_wakeword_during_tts,
         software_mute=False,
     )
+
+    # Attach the mute change callback if the mute_entity exists
+    if hasattr(state, 'mute_entity') and state.mute_entity is not None:
+        state.mute_entity.on_change = on_mute_change
 
     # Initialize shared software mute state
     try:

@@ -1,0 +1,204 @@
+import board
+import neopixel
+import time
+import threading
+import RPi.GPIO as GPIO
+
+NUM_PIXELS = 8
+PIXEL_PIN = board.D18
+BRIGHTNESS = 0.1
+
+# Rotary encoder GPIO pins (match rotary_test.py)
+CLK = 24  # Rotary encoder pin A (CLK)
+DT = 25   # Rotary encoder pin B (DT)
+SW = 27   # Switch/button
+
+COLOR_PRESETS = [
+    (255, 0, 0),    # Red
+    (0, 255, 0),    # Green
+    (0, 0, 255),    # Blue
+    (255, 255, 0),  # Yellow
+    (255, 0, 255),  # Magenta
+]
+
+pixels = neopixel.NeoPixel(PIXEL_PIN, NUM_PIXELS, brightness=BRIGHTNESS, auto_write=True)
+
+clk_last_state = None
+rotary_lock = threading.Lock()
+pattern_index = 0
+color_index = 0
+brightness = BRIGHTNESS
+running = True
+
+def rotary_listener():
+    global pattern_index, brightness, running, clk_last_state
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setup(CLK, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.setup(DT, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.setup(SW, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    clk_last_state = GPIO.input(CLK)
+    sw_last_state = GPIO.input(SW)
+    debounce_time = 0.2
+    last_sw_time = 0
+    while running:
+        clk_state = GPIO.input(CLK)
+        dt_state = GPIO.input(DT)
+        sw_state = GPIO.input(SW)
+        # Only act on falling edge of CLK
+        if clk_last_state == 1 and clk_state == 0:
+            with rotary_lock:
+                if dt_state != clk_state:
+                    brightness = min(1.0, round(brightness + 0.05, 2))
+                else:
+                    brightness = max(0.0, round(brightness - 0.05, 2))
+                print(f"Brightness: {brightness}")
+        clk_last_state = clk_state
+        # Button press (cycle pattern)
+        if sw_state == 0 and sw_last_state == 1:
+            now = time.time()
+            if now - last_sw_time > debounce_time:
+                with rotary_lock:
+                    pattern_index = (pattern_index + 1) % 5
+                    print(f"Pattern: {pattern_index+1}")
+                last_sw_time = now
+        sw_last_state = sw_state
+        time.sleep(0.01)
+
+def breathing(color):
+    for b in list(range(0, 256, 4)) + list(range(255, -1, -4)):
+        if pattern_index != 0 or not running:
+            break
+        factor = b / 255.0
+        c = tuple(int(x * factor) for x in color)
+        pixels.brightness = brightness
+        pixels.fill(c)
+        time.sleep(0.01)
+
+def pulsing(color):
+    for _ in range(3):
+        if pattern_index != 1 or not running:
+            break
+        for b in range(0, 256, 8):
+            if pattern_index != 1 or not running or color != COLOR_PRESETS[color_index]:
+                return
+            c = tuple(int(x * (b / 255.0)) for x in color)
+            pixels.brightness = brightness
+            pixels.fill(c)
+            time.sleep(0.005)
+        for b in range(255, -1, -8):
+            if pattern_index != 1 or not running or color != COLOR_PRESETS[color_index]:
+                return
+            c = tuple(int(x * (b / 255.0)) for x in color)
+            pixels.brightness = brightness
+            pixels.fill(c)
+            time.sleep(0.005)
+
+def cylon(color):
+    fade_template = [0.2, 0.5, 1.0, 1.0, 0.5, 0.2]
+    fade_len = len(fade_template)
+    center_range = range(2, NUM_PIXELS-2+1)
+    for _ in range(3):
+        if pattern_index != 2 or not running:
+            break
+        for center in center_range[:-1]:
+            if pattern_index != 2 or not running or color != COLOR_PRESETS[color_index]:
+                return
+            pixels.brightness = brightness
+            for i in range(NUM_PIXELS):
+                fade_idx = i - center + (fade_len // 2)
+                if 0 <= fade_idx < fade_len:
+                    fade = fade_template[fade_idx]
+                else:
+                    fade = fade_template[0]
+                c = tuple(int(x * fade) for x in color)
+                pixels[i] = c
+            time.sleep(0.105)
+        for center in reversed(center_range[1:]):
+            if pattern_index != 2 or not running or color != COLOR_PRESETS[color_index]:
+                return
+            pixels.brightness = brightness
+            for i in range(NUM_PIXELS):
+                fade_idx = i - center + (fade_len // 2)
+                if 0 <= fade_idx < fade_len:
+                    fade = fade_template[fade_idx]
+                else:
+                    fade = fade_template[0]
+                c = tuple(int(x * fade) for x in color)
+                pixels[i] = c
+            time.sleep(0.105)
+
+def static(color):
+    while running and pattern_index == 3:
+        pixels.brightness = brightness
+        pixels.fill(color)
+        time.sleep(0.05)
+
+def ripple(color):
+    for _ in range(3):
+        if pattern_index != 4 or not running:
+            break
+        for i in range(NUM_PIXELS):
+            if pattern_index != 4 or not running or color != COLOR_PRESETS[color_index]:
+                return
+            pixels.brightness = brightness
+            pixels.fill((0, 0, 0))
+            for j in range(i + 1):
+                fade = 1 - (j / NUM_PIXELS)
+                c = tuple(int(x * fade) for x in color)
+                pixels[i - j] = c
+            time.sleep(0.07)
+
+def pattern_runner():
+    global pattern_index, color_index, running
+    global brightness
+    while running:
+        color = COLOR_PRESETS[color_index]
+        with rotary_lock:
+            pixels.brightness = brightness
+            pat_idx = pattern_index
+        if pat_idx == 0:
+            breathing(color)
+        elif pat_idx == 1:
+            pulsing(color)
+        elif pat_idx == 2:
+            cylon(color)
+        elif pat_idx == 3:
+            static(color)
+        elif pat_idx == 4:
+            ripple(color)
+        else:
+            pixels.fill((0, 0, 0))
+            time.sleep(0.1)
+
+def main():
+    global running
+    print("Use rotary encoder: push to cycle patterns, rotate to adjust brightness. Ctrl+C to exit.")
+    t_pattern = threading.Thread(target=pattern_runner)
+    t_rotary = threading.Thread(target=rotary_listener)
+    t_pattern.start()
+    t_rotary.start()
+    t_pattern.join()
+    running = False
+    t_rotary.join()
+    pixels.fill((0, 0, 0))
+    try:
+        GPIO.cleanup()
+    except Exception:
+        pass
+    print("All LEDs off and GPIO released.")
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        running = False
+        try:
+            pixels.fill((0, 0, 0))
+            pixels.show()
+        except Exception:
+            pass
+        try:
+            GPIO.cleanup()
+        except Exception:
+            pass
+        print("All LEDs off and GPIO released.")

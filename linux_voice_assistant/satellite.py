@@ -84,19 +84,8 @@ def _set_led(trigger: str) -> None:
     
     Only runs on Raspberry Pi systems.
     """
-    led_path = Path("/sys/class/leds/PWR/trigger")
-    if not led_path.exists():
-        return  # LED control not available on this system
-    
-    try:
-        subprocess.run(
-            ["sudo", "tee", str(led_path)],
-            input=f"{trigger}\n".encode(),
-            check=True,
-            capture_output=True,
-        )
-    except Exception as e:
-        _LOGGER.debug("Could not set LED trigger to %s: %s", trigger, e)
+    # LED control removed: sudo tee to /sys/class/leds/PWR/trigger is not safe in service context
+    return
 
 
 def _set_screen_dpms(timeout: int, display: str = ":0") -> None:
