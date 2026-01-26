@@ -69,8 +69,6 @@ If audio issues persist, check dmesg for hardware errors, and consult Armbian/Or
 # Linux Voice Assistant – AI Agent Coding Guide
 
 ## Project Architecture
-- **Multi-instance voice satellite** for Home Assistant using the ESPHome protocol.
-- **Core files:**
   - `satellite.py`: Main protocol logic, voice event handling, audio streaming, TTS, wake word, timer, and Pi LED feedback.
   - `api_server.py`: ESPHome protocol base server, message parsing, authentication.
   - `__main__.py`: CLI entry, preferences loading, wake word discovery, event loop setup.
@@ -80,6 +78,58 @@ If audio issues persist, check dmesg for hardware errors, and consult Armbian/Or
   - `zeroconf.py`: mDNS/zeroconf discovery for Home Assistant.
   - `script/`: Python scripts for setup, deployment, and management (not shell scripts).
 
+## 2026 Project Health & Modernization Notes
+
+### Code Quality & Style
+- Ensure all CLI scripts use `argparse` or `typer` for argument parsing (avoid manual `sys.argv` parsing).
+- Prefer f-strings over `%` formatting for strings.
+- Use `asyncio.Queue` and async/await for all async patterns; avoid manual threading where possible.
+- Use context managers (`with`) for resource handling (files, sockets, etc.).
+- Add type annotations and docstrings throughout the codebase.
+- Use `pathlib.Path` for file path manipulations.
+- Run `black` and `isort` for formatting and import sorting.
+
+### Security & Safety
+- Avoid unsafe subprocess usage and ensure all system calls are sanitized.
+- Do not use `eval` or `exec`.
+- Handle files securely (permissions, no hardcoded secrets).
+- Use specific exception handling (avoid bare `except:`).
+
+### Dependencies & Environment
+- Pin all Python dependencies in `requirements.txt` or `pyproject.toml` for reproducibility.
+- Monitor and update dependencies regularly; consider automated tools (e.g., dependabot, pip-audit).
+- Test and document compatibility with PipeWire, as it is now the default on many Linux distributions.
+- Monitor the maintenance status of `microWakeWord` and alternatives.
+
+### Architecture & Design
+- The project is modular and async/event-driven, but monitor the single event loop for bottlenecks if scaling up.
+- `ServerState` centralizes runtime state; avoid it becoming a "God object" as features grow.
+- Consider decoupling the audio layer for easier backend swapping (PulseAudio, ALSA, PipeWire).
+- A plugin system for wake words/entities/audio could improve extensibility.
+- Increase automated test coverage, especially for protocol and audio processing.
+- JSON config is simple but may not scale for advanced features or concurrent access—consider more robust config management if needed.
+
+### Summary Table
+
+| Area                | Issue/Opportunity                | Recommendation                        |
+|---------------------|----------------------------------|---------------------------------------|
+| CLI Parsing         | Manual parsing                   | Use `argparse`/`typer`                |
+| String Formatting   | Old-style `%` formatting         | Use f-strings                         |
+| Async Patterns      | Manual threading/queues          | Use `asyncio`                         |
+| Resource Handling   | Manual open/close                | Use context managers                  |
+| Type Annotations    | Missing                          | Add type hints                        |
+| Exception Handling  | Bare except                      | Catch specific exceptions             |
+| Path Handling       | String paths                     | Use `pathlib.Path`                    |
+| Docstrings          | Missing/incomplete               | Add/expand docstrings                 |
+| Formatting          | Inconsistent style               | Run `black`/`isort`                   |
+| Dependency Pinning  | Not explicit                     | Pin in requirements.txt/pyproject.toml|
+| PipeWire Support    | Not explicit                     | Add/test/document PipeWire            |
+| State Management    | Centralized, may grow            | Monitor/refactor as needed            |
+| Audio Layer         | Tightly coupled                  | Abstract for backend flexibility      |
+| Test Coverage       | Unclear                          | Increase, especially for audio/protocol|
+
+---
+This section should be reviewed and updated regularly as the Linux and Python ecosystem evolves.
 ## Data Flow
 - Audio → Wake word detection → Audio stream to Home Assistant → STT/intent/TTS → TTS playback (with music ducking) → Visual feedback (LED on Pi).
 - All async/event-driven via a single asyncio event loop.
