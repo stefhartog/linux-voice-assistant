@@ -19,6 +19,9 @@ def get_lva_service_names():
             service_names.append(f"{name}.service")
     return service_names
 
+# Track mute state per service
+mute_states = {}
+
 def send_to_socket(cmd):
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -35,6 +38,9 @@ def follow_single_journal(svc):
     cmd = ["journalctl", "--user", "-u", svc, "-f", "-n", "0"]
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     
+    # Initialize mute state for this service
+    mute_states[svc] = False
+    
     try:
         while True:
             line = p.stdout.readline()
@@ -43,19 +49,27 @@ def follow_single_journal(svc):
             
             l = line.lower()
             # Filter and translate relevant events to simple commands
-            if "detected wake word" in l or "voice_assistant_stt_start" in l:
+            if "wake word detected while muted" in l:
+                send_to_socket("muted_wakeword")
+            elif "detected wake word" in l or "voice_assistant_stt_start" in l:
                 send_to_socket("listening")
             elif "voice_assistant_stt_end" in l:
                 send_to_socket("processing")
             elif "playing http" in l:
                 send_to_socket("responding")
             elif "tts response finished" in l:
-                send_to_socket("idle")
+                # Return to mute if still muted, otherwise idle
+                if mute_states.get(svc, False):
+                    send_to_socket("mute")
+                else:
+                    send_to_socket("idle")
             elif "assistant mute changed: true" in l:
                 print(f"[debug] {svc}: Assistant mute changed: True. Sending 'mute' to neopixel.")
+                mute_states[svc] = True
                 send_to_socket("mute")
             elif "assistant mute changed: false" in l:
                 print(f"[debug] {svc}: Assistant mute changed: False. Sending 'idle' to neopixel.")
+                mute_states[svc] = False
                 send_to_socket("idle")
     except Exception as e:
         print(f"[error] Thread for {svc} failed: {e}")

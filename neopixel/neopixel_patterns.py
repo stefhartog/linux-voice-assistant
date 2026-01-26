@@ -9,7 +9,7 @@ import threading
 
 NUM_PIXELS = 8
 PIXEL_PIN = board.D18
-BRIGHTNESS = 0.1
+BRIGHTNESS = 0.05
 MIN_BREATHE_FACTOR = 0.1  # Minimum brightness factor during breathing to avoid fully off
 
 COLOR_PRESETS = [
@@ -148,6 +148,52 @@ def volume_bar(volume_percent):
         pixels[i] = color
     pixels.show()
 
+def mute_collapse():
+    """Outer pixels travel inward and dim, ending with just center two LEDs dimly lit."""
+    print(f"[debug] Entered mute_collapse")
+    color = (255, 0, 0)  # Red
+    very_dim_factor = 0.1
+    
+    # Animation: pairs travel inward and dim
+    # Pairs: (0,7), (1,6), (2,5) -> finally just (3,4)
+    pairs = [(0, 7), (1, 6), (2, 5)]
+    
+    for pair_idx, (left, right) in enumerate(pairs):
+        if pattern_index != 5 or not running:
+            return
+        
+        # All pixels very dim
+        very_dim_color = tuple(int(x * very_dim_factor) for x in color)
+        
+        pixels.brightness = brightness
+        pixels[left] = very_dim_color
+        pixels[right] = very_dim_color
+        pixels.show()
+        time.sleep(0.15)
+    
+    # Final state: just center two pixels very dim
+    very_dim_color = tuple(int(x * very_dim_factor) for x in color)
+    pixels.fill((0, 0, 0))
+    pixels.brightness = brightness
+    pixels[3] = very_dim_color
+    pixels[4] = very_dim_color
+    pixels.show()
+
+def mute_idle():
+    """Hold the mute state with just center two pixels dimly lit."""
+    print(f"[debug] Entered mute_idle")
+    color = (255, 0, 0)  # Red
+    very_dim_factor = 0.1
+    very_dim_color = tuple(int(x * very_dim_factor) for x in color)
+    
+    while running and pattern_index == 6:
+        pixels.brightness = brightness
+        pixels.fill((0, 0, 0))
+        pixels[3] = very_dim_color
+        pixels[4] = very_dim_color
+        pixels.show()
+        time.sleep(0.05)
+
 
 def pattern_runner():
     global pattern_index, color_index, running
@@ -193,6 +239,14 @@ def pattern_runner():
         elif pat_idx == 4:
             print("[debug] Calling ripple")
             ripple(color)
+        elif pat_idx == 5:
+            print("[debug] Calling mute_collapse")
+            mute_collapse()
+            # After animation, switch to idle state
+            pattern_index = 6
+        elif pat_idx == 6:
+            print("[debug] Calling mute_idle")
+            mute_idle()
         else:
             print("[debug] pattern_index is off/unknown, turning off LEDs")
             pixels.fill((0, 0, 0))
@@ -233,9 +287,12 @@ def main():
                             color_index = 2    # blue (COLOR_PRESETS[2])
                             print(f"[debug] socket_listener set pattern_index=0 (on), color_index=2 (blue)")
                         elif cmd == "mute":
-                            pattern_index = 3  # static
-                            color_index = 0    # red (COLOR_PRESETS[0])
-                            print(f"[debug] socket_listener set pattern_index=3 (mute), color_index=0 (red)")
+                            pattern_index = 5  # mute_collapse animation
+                            print(f"[debug] socket_listener set pattern_index=5 (mute collapse)")
+                        elif cmd == "muted_wakeword":
+                            # Replay the collapse animation
+                            pattern_index = 5  # mute_collapse animation
+                            print(f"[debug] socket_listener set pattern_index=5 (muted wakeword detected)")
                         elif cmd == "error":
                             pattern_index = 1  # pulsing
                             color_index = 0    # red (COLOR_PRESETS[0])

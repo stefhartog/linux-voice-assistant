@@ -507,8 +507,13 @@ def process_audio(state: ServerState, mic, block_size: int):
                     except Exception:
                         _LOGGER.debug("Mute poll failed", exc_info=True)
 
-                if state.software_mute:
-                    continue
+                # Allow wake word detection even when muted, but skip audio transmission unless actively streaming
+                if state.software_mute and state.satellite and not state.satellite._is_streaming_audio:
+                    # When muted and not streaming, skip audio transmission but still process wake words below
+                    pass
+                elif state.satellite:
+                    # Normal operation: send audio to Home Assistant for processing
+                    state.satellite.handle_audio(audio_chunk)
 
                 if (not wake_words) or (state.wake_words_changed and state.wake_words):
                     # Update list of wake word models to process
@@ -531,8 +536,6 @@ def process_audio(state: ServerState, mic, block_size: int):
                         oww_features = OpenWakeWordFeatures.from_builtin()
 
                 try:
-                    state.satellite.handle_audio(audio_chunk)
-
                     assert micro_features is not None
                     micro_inputs.clear()
                     micro_inputs.extend(micro_features.process_streaming(audio_chunk))
@@ -564,7 +567,11 @@ def process_audio(state: ServerState, mic, block_size: int):
                             if (last_active is None) or (
                                 (now - last_active) > state.refractory_seconds
                             ):
-                                state.satellite.wakeup(wake_word)
+                                if state.software_mute:
+                                    # Wake word detected but muted - log for LED animation
+                                    _LOGGER.debug("Wake word detected while muted: %s", wake_word.wake_word)
+                                else:
+                                    state.satellite.wakeup(wake_word)
                                 last_active = now
 
                     # Always process to keep state correct

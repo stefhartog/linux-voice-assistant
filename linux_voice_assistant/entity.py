@@ -4,6 +4,8 @@ from typing import Callable, List, Optional, Union
 
 # pylint: disable=no-name-in-module
 from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]
+    ButtonCommandRequest,
+    ListEntitiesButtonResponse,
     ListEntitiesMediaPlayerResponse,
     ListEntitiesRequest,
     ListEntitiesTextSensorResponse,
@@ -229,3 +231,42 @@ class SwitchEntity(ESPHomeEntity):
             key=self.key,
             state=self.state,
         )
+
+
+class ButtonEntity(ESPHomeEntity):
+    def __init__(
+        self,
+        server: APIServer,
+        key: int,
+        name: str,
+        object_id: str,
+        on_press: Optional[Callable[[], None]] = None,
+    ) -> None:
+        super().__init__(server)
+        self.key = key
+        self.name = name
+        self.object_id = object_id
+        self.on_press = on_press
+
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, ButtonCommandRequest) and (msg.key == self.key):
+            import logging
+            logging.getLogger(__name__).info(
+                "Button pressed: key=%s object_id=%s", self.key, self.object_id
+            )
+            if self.on_press:
+                try:
+                    self.on_press()
+                except Exception as e:
+                    logging.getLogger(__name__).error("Error handling button press: %s", e)
+                    raise
+        elif isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesButtonResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+                icon="mdi:microphone",
+            )
+        elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
+            # Buttons don't have state to report
+            pass

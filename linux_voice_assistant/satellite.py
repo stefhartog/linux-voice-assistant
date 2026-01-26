@@ -17,6 +17,7 @@ import json
 
 # pylint: disable=no-name-in-module
 from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]
+    ButtonCommandRequest,
     DeviceInfoRequest,
     DeviceInfoResponse,
     ListEntitiesDoneResponse,
@@ -46,7 +47,7 @@ from pymicro_wakeword import MicroWakeWord
 from pyopen_wakeword import OpenWakeWord
 
 from .api_server import APIServer
-from .entity import MediaPlayerEntity, TextAttributeEntity, SwitchEntity
+from .entity import ButtonEntity, MediaPlayerEntity, TextAttributeEntity, SwitchEntity
 from .models import AvailableWakeWord, ServerState, WakeWordType
 from .util import call_all
 
@@ -165,6 +166,40 @@ class VoiceSatelliteProtocol(APIServer):
                     _on_mute_change(True)
                 except Exception:
                     _LOGGER.debug("Failed applying initial mute state", exc_info=True)
+        
+        if self.state.push_button_entity is None:
+            def _on_button_press() -> None:
+                _LOGGER.info("Push button pressed - triggering voice pipeline")
+
+                # Prefer showing the primary wake word name instead of the generic label
+                primary_wake_word = None
+                if self.state.active_wake_words:
+                    primary_wake_word = next(iter(self.state.active_wake_words), None)
+
+                phrase = "Push to Talk"
+                if primary_wake_word and primary_wake_word in self.state.wake_words:
+                    ww_obj = self.state.wake_words[primary_wake_word]
+                    friendly = self.state.global_preferences.wake_word_friendly_names.get(
+                        primary_wake_word, ww_obj.wake_word
+                    )
+                    phrase = friendly
+
+                self._update_active_assistant(phrase)
+                self.send_messages(
+                    [VoiceAssistantRequest(start=True, wake_word_phrase=phrase)]
+                )
+                self.duck()
+                self._is_streaming_audio = True
+                self.state.tts_player.play(self.state.wakeup_sound)
+
+            self.state.push_button_entity = ButtonEntity(
+                server=self,
+                key=len(state.entities),
+                name="Push to Talk",
+                object_id="push_to_talk",
+                on_press=_on_button_press,
+            )
+            self.state.entities.append(self.state.push_button_entity)
 
         self._is_streaming_audio = False
         self._tts_url: Optional[str] = None
@@ -296,6 +331,7 @@ class VoiceSatelliteProtocol(APIServer):
                 SubscribeHomeAssistantStatesRequest,
                 MediaPlayerCommandRequest,
                 SwitchCommandRequest,
+                ButtonCommandRequest,
             ),
         ):
             for entity in self.state.entities:
@@ -459,9 +495,9 @@ class VoiceSatelliteProtocol(APIServer):
             if self._screen_management_timeout > 0:
                 _LOGGER.info("Setting screen sleep timeout to %d seconds", self._screen_management_timeout)
                 _set_screen_dpms(self._screen_management_timeout)
-            # Clear sensors after 5 seconds (using stored loop reference)
+            # Clear sensors after 0 seconds (using stored loop reference)
             if self._loop is not None:
-                self._loop.call_later(5.0, self._clear_sensors)
+                self._loop.call_later(5, self._clear_sensors)
             else:
                 _LOGGER.warning("No event loop available for delayed sensor clearing")
 
