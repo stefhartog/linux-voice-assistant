@@ -12,6 +12,7 @@ import os
 
 # List of systemd user unit names to monitor (hardcoded)
 PREF_USER_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "preferences", "user")
+MUTE_STATE_PATH = "/dev/shm/lvas_system_mute"
 LVA_SERVICES = [
     os.path.basename(f) for f in glob.glob(os.path.join(PREF_USER_DIR, "*.service"))
 ]
@@ -27,6 +28,25 @@ EVENT_TO_PATTERN = {
 LVA_EVENT_RE = re.compile(r"LVA_EVENT: (\w+)")
 MUTE_RE = re.compile(r"Assistant mute changed: (True|False)")
 WAKEWORD_MUTED_RE = re.compile(r"Wakeword triggered while muted\.")
+HA_CONNECTED_RE = re.compile(r"Connected to Home Assistant")
+
+
+def _is_muted() -> bool:
+    try:
+        with open(MUTE_STATE_PATH, "r", encoding="utf-8") as state_file:
+            return state_file.read().strip().lower().startswith("on")
+    except Exception:
+        return False
+
+
+def _start_idle_pattern(current_thread: "PatternThread") -> "PatternThread":
+    if current_thread and current_thread.is_alive():
+        current_thread.stop()
+        current_thread.join()
+    color = (10, 0, 0) if _is_muted() else (0, 0, 20)
+    current_thread = PatternThread(listening_inward, color=color)
+    current_thread.start()
+    return current_thread
 
 class PatternThread(threading.Thread):
     def __init__(self, pattern_func, *args, **kwargs):
@@ -84,23 +104,15 @@ def main():
                     break
             mute_match = MUTE_RE.search(line)
             if mute_match:
-                is_muted = mute_match.group(1) == "True"
-                if current_thread and current_thread.is_alive():
-                    current_thread.stop()
-                    current_thread.join()
-                if is_muted:
-                    current_thread = PatternThread(listening_inward, color=(30, 0, 0))
-                else:
-                    current_thread = PatternThread(listening_inward)
-                current_thread.start()
+                current_thread = _start_idle_pattern(current_thread)
                 continue
 
             if WAKEWORD_MUTED_RE.search(line):
-                if current_thread and current_thread.is_alive():
-                    current_thread.stop()
-                    current_thread.join()
-                current_thread = PatternThread(listening_inward, color=(30, 0, 0))
-                current_thread.start()
+                current_thread = _start_idle_pattern(current_thread)
+                continue
+
+            if HA_CONNECTED_RE.search(line):
+                current_thread = _start_idle_pattern(current_thread)
                 continue
 
             match = LVA_EVENT_RE.search(line)
@@ -117,8 +129,11 @@ def main():
                         current_thread.join()
                     func, args, *kwargs = pattern_info
                     kwargs = kwargs[0] if kwargs else {}
-                    current_thread = PatternThread(func, *args, **kwargs)
-                    current_thread.start()
+                    if event == "TTS_RESPONSE_FINISHED":
+                        current_thread = _start_idle_pattern(current_thread)
+                    else:
+                        current_thread = PatternThread(func, *args, **kwargs)
+                        current_thread.start()
     except KeyboardInterrupt:
         print("Exiting LED journal pattern service.")
     finally:

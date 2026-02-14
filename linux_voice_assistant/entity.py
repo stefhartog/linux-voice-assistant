@@ -4,7 +4,9 @@ from typing import Callable, List, Optional, Union
 
 # pylint: disable=no-name-in-module
 from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]
+    ButtonCommandRequest,
     ListEntitiesMediaPlayerResponse,
+    ListEntitiesButtonResponse,
     ListEntitiesRequest,
     ListEntitiesTextSensorResponse,
     ListEntitiesSwitchResponse,
@@ -188,6 +190,7 @@ class SwitchEntity(ESPHomeEntity):
         object_id: str,
         initial_state: bool = False,
         on_change: Optional[Callable[[bool], None]] = None,
+        icon: Optional[str] = None,
     ) -> None:
         super().__init__(server)
         self.key = key
@@ -195,6 +198,7 @@ class SwitchEntity(ESPHomeEntity):
         self.object_id = object_id
         self.state = initial_state
         self.on_change = on_change
+        self.icon = icon
 
     def set_state(self, new_state: bool) -> SwitchStateResponse:
         self.state = new_state
@@ -219,7 +223,7 @@ class SwitchEntity(ESPHomeEntity):
                 object_id=self.object_id,
                 key=self.key,
                 name=self.name,
-                icon="mdi:microphone-off",
+                icon=self.icon,
             )
         elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
             yield self._get_state_message()
@@ -229,3 +233,39 @@ class SwitchEntity(ESPHomeEntity):
             key=self.key,
             state=self.state,
         )
+
+
+class ButtonEntity(ESPHomeEntity):
+    def __init__(
+        self,
+        server: APIServer,
+        key: int,
+        name: str,
+        object_id: str,
+        on_press: Optional[Callable[[], None]] = None,
+        icon: Optional[str] = None,
+    ) -> None:
+        super().__init__(server)
+        self.key = key
+        self.name = name
+        self.object_id = object_id
+        self.on_press = on_press
+        self.icon = icon
+
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, ButtonCommandRequest) and (msg.key == self.key):
+            import logging
+            logging.getLogger(__name__).info(
+                "Button press received: key=%s object_id=%s", self.key, self.object_id
+            )
+            if self.on_press:
+                self.on_press()
+            return []
+        elif isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesButtonResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+                icon=self.icon,
+            )
+        return []

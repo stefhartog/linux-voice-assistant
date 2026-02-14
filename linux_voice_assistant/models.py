@@ -99,6 +99,8 @@ class ServerState:
     shared_mute_path: Path = Path("/dev/shm/lvas_system_mute")
 
     mute_entity: "Optional[ESPHomeEntity]" = None
+    listen_entity: "Optional[ESPHomeEntity]" = None
+    restart_entity: "Optional[ESPHomeEntity]" = None
 
     def save_preferences(self) -> None:
         """Save per-instance preferences (currently active wake words)."""

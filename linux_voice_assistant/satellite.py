@@ -17,6 +17,7 @@ import json
 
 # pylint: disable=no-name-in-module
 from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]
+    ButtonCommandRequest,
     DeviceInfoRequest,
     DeviceInfoResponse,
     ListEntitiesDoneResponse,
@@ -46,7 +47,7 @@ from pymicro_wakeword import MicroWakeWord
 from pyopen_wakeword import OpenWakeWord
 
 from .api_server import APIServer
-from .entity import MediaPlayerEntity, TextAttributeEntity, SwitchEntity
+from .entity import ButtonEntity, MediaPlayerEntity, TextAttributeEntity, SwitchEntity
 from .models import AvailableWakeWord, ServerState, WakeWordType
 from .util import call_all
 
@@ -138,6 +139,20 @@ class VoiceSatelliteProtocol(APIServer):
             )
             self.state.entities.append(self.state.active_assistant_entity)
 
+        if self.state.listen_entity is None:
+            def _on_listen_press() -> None:
+                self._start_manual_listening()
+
+            self.state.listen_entity = ButtonEntity(
+                server=self,
+                key=len(state.entities),
+                name="Push to Talk",
+                object_id="assistant_push_to_talk",
+                on_press=_on_listen_press,
+                icon="mdi:microphone",
+            )
+            self.state.entities.append(self.state.listen_entity)
+
         if self.state.mute_entity is None:
             def _on_mute_change(new_state: bool) -> None:
                 _LOGGER.info("Assistant mute changed: %s", new_state)
@@ -157,6 +172,7 @@ class VoiceSatelliteProtocol(APIServer):
                 object_id="assistant_mute",
                 initial_state=self.state.software_mute,
                 on_change=_on_mute_change,
+                icon="mdi:microphone-off",
             )
             self.state.entities.append(self.state.mute_entity)
             # Apply initial mute state to system if already set
@@ -166,6 +182,20 @@ class VoiceSatelliteProtocol(APIServer):
                 except Exception:
                     _LOGGER.debug("Failed applying initial mute state", exc_info=True)
 
+        if self.state.restart_entity is None:
+            def _on_restart_press() -> None:
+                self._restart_services()
+
+            self.state.restart_entity = ButtonEntity(
+                server=self,
+                key=len(state.entities),
+                name="Assistant Restart",
+                object_id="assistant_restart",
+                on_press=_on_restart_press,
+                icon="mdi:restart",
+            )
+            self.state.entities.append(self.state.restart_entity)
+
         self._is_streaming_audio = False
         self._tts_url: Optional[str] = None
         self._tts_played = False
@@ -174,12 +204,36 @@ class VoiceSatelliteProtocol(APIServer):
         self._external_wake_words: Dict[str, VoiceAssistantExternalWakeWord] = {}
         self._current_assistant_name: str = "Assistant"
         self._screen_management_timeout = state.screen_management
+        self._restore_mute_entity = False
         
         _LOGGER.info("Screen management timeout: %d seconds", self._screen_management_timeout)
         # Set LED to idle state on init
 
         # Log service ready event for LED journal
         _LOGGER.info("LVA_EVENT: SERVICE_READY")
+
+
+    def _start_manual_listening(self) -> None:
+        _LOGGER.info("Manual listen triggered")
+        if self.state.software_mute and self.state.mute_entity is not None:
+            self._restore_mute_entity = True
+            self.send_messages([self.state.mute_entity.set_state(False)])
+            _LOGGER.info("Assistant mute changed: False")
+        self._update_active_stt("")
+        self._update_active_tts("")
+        self.send_messages([VoiceAssistantRequest(start=True)])
+        self.duck()
+        self._is_streaming_audio = True
+        self.state.tts_player.play(self.state.wakeup_sound)
+
+
+    def _restart_services(self) -> None:
+        script_path = Path(__file__).parent.parent / "script" / "restart"
+        _LOGGER.info("Restarting LVA services via %s", script_path)
+        try:
+            subprocess.Popen([str(script_path)])
+        except Exception:
+            _LOGGER.exception("Failed to restart LVA services")
 
 
     def handle_voice_event(
@@ -300,6 +354,7 @@ class VoiceSatelliteProtocol(APIServer):
                 ListEntitiesRequest,
                 SubscribeHomeAssistantStatesRequest,
                 MediaPlayerCommandRequest,
+                ButtonCommandRequest,
                 SwitchCommandRequest,
             ),
         ):
@@ -472,6 +527,11 @@ class VoiceSatelliteProtocol(APIServer):
 
         _LOGGER.info("LVA_EVENT: TTS_RESPONSE_FINISHED")
         _LOGGER.debug("TTS response finished")
+
+        if self._restore_mute_entity and self.state.mute_entity is not None:
+            self.send_messages([self.state.mute_entity.set_state(True)])
+            _LOGGER.info("Assistant mute changed: True")
+            self._restore_mute_entity = False
 
     def _clear_sensors(self) -> None:
         """Clear all text sensors."""
