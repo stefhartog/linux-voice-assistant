@@ -6,7 +6,7 @@ import subprocess
 import threading
 import re
 import time
-from state_patterns import all_off_stoppable, pulse_wave, cylon_bounce, color_cycle_breathing, all_off
+from state_patterns import all_off_stoppable, pulse_wave, cylon_bounce, color_cycle_breathing, all_off, listening_inward
 import glob
 import os
 
@@ -19,12 +19,14 @@ LVA_SERVICES = [
 # Map LVA event types to pattern functions and arguments
 EVENT_TO_PATTERN = {
     "VOICE_ASSISTANT_RUN_START": (color_cycle_breathing, (), {'color': (50,50,0)}), # Yellow breathing (listening)
-    "VOICE_ASSISTANT_INTENT_START": (cylon_bounce, ()),                           # Purple Cylon Bounce
-    "VOICE_ASSISTANT_TTS_START": (color_cycle_breathing, (), {'color': (0,50,0)}),# Green breathing
-    "TTS_RESPONSE_FINISHED": (all_off_stoppable, ()),                             # All Off (precise end)
+    "VOICE_ASSISTANT_INTENT_START": (cylon_bounce, ()),                             # Purple Cylon Bounce
+    "VOICE_ASSISTANT_TTS_START": (color_cycle_breathing, (), {'color': (0,50,0)}),  # Green breathing
+    "TTS_RESPONSE_FINISHED": (listening_inward, ()),                                # Idle inward sweep, blue
 }
 
 LVA_EVENT_RE = re.compile(r"LVA_EVENT: (\w+)")
+MUTE_RE = re.compile(r"Assistant mute changed: (True|False)")
+WAKEWORD_MUTED_RE = re.compile(r"Wakeword triggered while muted\.")
 
 class PatternThread(threading.Thread):
     def __init__(self, pattern_func, *args, **kwargs):
@@ -80,6 +82,27 @@ def main():
                 if svc in line:
                     svc_name = svc
                     break
+            mute_match = MUTE_RE.search(line)
+            if mute_match:
+                is_muted = mute_match.group(1) == "True"
+                if current_thread and current_thread.is_alive():
+                    current_thread.stop()
+                    current_thread.join()
+                if is_muted:
+                    current_thread = PatternThread(listening_inward, color=(30, 0, 0))
+                else:
+                    current_thread = PatternThread(listening_inward)
+                current_thread.start()
+                continue
+
+            if WAKEWORD_MUTED_RE.search(line):
+                if current_thread and current_thread.is_alive():
+                    current_thread.stop()
+                    current_thread.join()
+                current_thread = PatternThread(listening_inward, color=(30, 0, 0))
+                current_thread.start()
+                continue
+
             match = LVA_EVENT_RE.search(line)
             if svc_name and svc_name not in seen_services:
                 print(f"[LED] LVA service ready: {svc_name}")
