@@ -100,19 +100,39 @@ def color_cycle_breathing(stop_event=None, color=None):
     except KeyboardInterrupt:
         all_off()
 
+def listening_inward(stop_event=None, color=(0, 0, 30), step_delay=0.12, hold_delay=0.1):
+    try:
+        steps = [(0, 6), (1, 5), (2, 4)]
+        for left, right in steps:
+            if stop_event and stop_event.is_set():
+                return
+            leds = [(0, 0, 0)] * NUM_LEDS
+            leds[left] = color
+            leds[right] = color
+            send_colors(leds)
+            time.sleep(step_delay)
+
+        leds = [(0, 0, 0)] * NUM_LEDS
+        leds[3] = color
+        send_colors(leds)
+        while not (stop_event and stop_event.is_set()):
+            time.sleep(hold_delay)
+    except KeyboardInterrupt:
+        all_off()
+
 if __name__ == "__main__":
     try:
-        print("1: Processing (Cylon Bounce, purple)\n2: Listening (Pulse Wave, yellow)\n3: Responding (Pulse Wave, green)\n4: Mute (Solid Red)\n5: Startup (Color Cycle Breathing)\n0: All Off\nq: Quit")
+        print("1: Processing (Cylon Bounce, purple)\n2: Listening (Inward Sweep, blue)\n3: Responding (Pulse Wave, green)\n4: Mute (Inward Sweep, red)\n5: Startup (Color Cycle Breathing)\n0: All Off\nq: Quit")
         while True:
             choice = input("Select pattern: ").strip()
             if choice == "1":
                 cylon_bounce()
             elif choice == "2":
-                pulse_wave((50,50,0))  # yellow
+                listening_inward()
             elif choice == "3":
                 pulse_wave((0,50,0))   # green
             elif choice == "4":
-                solid_red()
+                listening_inward(color=(30, 0, 0))
             elif choice == "5":
                 color_cycle_breathing()
             elif choice == "0":

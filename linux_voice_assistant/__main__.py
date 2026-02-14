@@ -483,9 +483,6 @@ def process_audio(state: ServerState, mic, block_size: int):
                     except Exception:
                         _LOGGER.debug("Mute poll failed", exc_info=True)
 
-                if state.software_mute:
-                    continue
-
                 if (not wake_words) or (state.wake_words_changed and state.wake_words):
                     # Update list of wake word models to process
                     state.wake_words_changed = False
@@ -540,7 +537,10 @@ def process_audio(state: ServerState, mic, block_size: int):
                             if (last_active is None) or (
                                 (now - last_active) > state.refractory_seconds
                             ):
-                                state.satellite.wakeup(wake_word)
+                                if state.software_mute:
+                                    _LOGGER.info("Wakeword triggered while muted.")
+                                else:
+                                    state.satellite.wakeup(wake_word)
                                 last_active = now
 
                     # Always process to keep state correct
