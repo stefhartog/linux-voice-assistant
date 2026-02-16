@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""Recreate and restart services for autostart-enabled manager instances."""
+
+import json
+import subprocess
+import time
+from pathlib import Path
+import sys
+
+_SCRIPT_DIR = Path(__file__).parent
+_REPO_DIR = _SCRIPT_DIR.parent
+_PREFS_USER_DIR = _REPO_DIR / "preferences" / "user"
+_SERVICE_DIR = Path.home() / ".config" / "systemd" / "user"
+
+
+def _get_autostart_managers() -> list[str]:
+    autostart: list[str] = []
+    if not _PREFS_USER_DIR.exists():
+        return autostart
+
+    for cli_file in _PREFS_USER_DIR.glob("*_manager.json"):
+        try:
+            with open(cli_file, "r", encoding="utf-8") as file_obj:
+                config = json.load(file_obj)
+            if config.get("autostart") is True:
+                autostart.append(cli_file.stem.replace("_manager", ""))
+        except Exception:
+            continue
+    for cli_file in _PREFS_USER_DIR.glob("*_manager_cli.json"):
+        try:
+            with open(cli_file, "r", encoding="utf-8") as file_obj:
+                config = json.load(file_obj)
+            if config.get("autostart") is True:
+                autostart.append(cli_file.stem.replace("_manager_cli", ""))
+        except Exception:
+            continue
+
+    return autostart
+
+
+def _get_service_name(name: str) -> str:
+    return f"{name}_manager.service"
+
+
+def _get_service_path(name: str) -> Path:
+    return _SERVICE_DIR / _get_service_name(name)
+
+
+def _generate_service_file(name: str) -> str:
+    return f"""[Unit]
+Description=Linux Voice Assistant Manager - {name}
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory={_REPO_DIR}
+ExecStart={_REPO_DIR}/script/run-manager --name {name}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def _write_service(name: str) -> bool:
+    cli_file = _PREFS_USER_DIR / f"{name}_manager.json"
+    legacy_cli_file = _PREFS_USER_DIR / f"{name}_manager_cli.json"
+    if not cli_file.exists() and not legacy_cli_file.exists():
+        missing_name = cli_file.name
+        print(f"Skipping {name}: missing {missing_name}")
+        return False
+
+    _SERVICE_DIR.mkdir(parents=True, exist_ok=True)
+    service_path = _get_service_path(name)
+    try:
+        service_path.write_text(_generate_service_file(name), encoding="utf-8")
+        print(f"Wrote {service_path}")
+        return True
+    except Exception as exc:
+        print(f"Error writing {service_path}: {exc}")
+        return False
+
+
+def main() -> None:
+    target_name = None
+    args = sys.argv[1:]
+    for i, arg in enumerate(args):
+        if arg == "--name" and i + 1 < len(args):
+            target_name = args[i + 1]
+            break
+        if not arg.startswith("-") and target_name is None:
+            target_name = arg
+
+    autostart = _get_autostart_managers()
+    if target_name:
+        autostart = [n for n in autostart if n == target_name]
+        if not autostart:
+            print(f"No autostart managers match '{target_name}'.")
+            return
+    elif not autostart:
+        print("No managers with autostart: true found")
+        return
+
+    print(f"Found {len(autostart)} manager instance(s) with autostart enabled:")
+    for name in autostart:
+        print(f"  - {name}")
+
+    print()
+    success = 0
+    for name in autostart:
+        service_path = _get_service_path(name)
+        if service_path.exists():
+            print(f"[{name}] Updating existing service...")
+        else:
+            print(f"[{name}] Creating service...")
+
+        if _write_service(name):
+            success += 1
+
+    print("Reloading systemd...")
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+
+    print("Enabling and restarting manager services...")
+    for i, name in enumerate(autostart):
+        service_name = _get_service_name(name)
+        try:
+            subprocess.run(["systemctl", "--user", "enable", service_name], check=False)
+            subprocess.run(["systemctl", "--user", "restart", service_name], check=True)
+            print(f"Restarted: {service_name}")
+            if i < len(autostart) - 1:
+                time.sleep(2)
+        except Exception as exc:
+            print(f"Error restarting {service_name}: {exc}")
+
+    print(f"\nRestart complete: {success}/{len(autostart)} manager services refreshed")
+
+
+if __name__ == "__main__":
+    main()

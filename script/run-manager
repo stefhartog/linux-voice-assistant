@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+import json
+import os
+import platform
+import subprocess
+import sys
+import venv
+from pathlib import Path
+
+def _get_system_info() -> dict:
+    return {
+        "os": platform.system(),
+        "machine": platform.machine(),
+        "architecture": platform.architecture()[0],
+    }
+
+
+def _load_config(path: Path) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as file_obj:
+            return json.load(file_obj) or {}
+    except Exception:
+        return {}
+
+
+def _generate_random_mac() -> str:
+    import random
+    return ":".join(f"{random.randint(0,255):02x}" for _ in range(6))
+
+
+def _auto_assign_port(user_prefs_dir: Path, base_port: int) -> int:
+    used = set()
+    for other in user_prefs_dir.glob("*_cli.json"):
+        config = _load_config(other)
+        port_val = config.get("port")
+        try:
+            if port_val not in (None, False, "false", ""):
+                used.add(int(port_val))
+        except Exception:
+            continue
+    for other in user_prefs_dir.glob("*_manager.json"):
+        config = _load_config(other)
+        port_val = config.get("port")
+        try:
+            if port_val not in (None, False, "false", ""):
+                used.add(int(port_val))
+        except Exception:
+            continue
+    for other in user_prefs_dir.glob("*_manager_cli.json"):
+        config = _load_config(other)
+        port_val = config.get("port")
+        try:
+            if port_val not in (None, False, "false", ""):
+                used.add(int(port_val))
+        except Exception:
+            continue
+    port = base_port
+    while port in used:
+        port += 1
+    return port
+
+
+def _find_arg(argv: list[str], name: str) -> str | None:
+    try:
+        idx = argv.index(name)
+    except ValueError:
+        return None
+    if idx + 1 >= len(argv):
+        return None
+    return argv[idx + 1]
+
+
+def main() -> None:
+    argv = sys.argv[1:]
+    name = _find_arg(argv, "--name")
+    if not name:
+        print("Usage: script/run-manager --name NAME [--host HOST] [--port PORT]")
+        sys.exit(1)
+
+    script_dir = Path(__file__).parent
+    repo_dir = script_dir.parent
+    prefs_dir = repo_dir / "preferences" / "user"
+    prefs_dir.mkdir(parents=True, exist_ok=True)
+
+    cli_path = prefs_dir / f"{name}_manager.json"
+    legacy_cli_path = prefs_dir / f"{name}_manager_cli.json"
+    if cli_path.exists():
+        arg_map = _load_config(cli_path)
+    elif legacy_cli_path.exists():
+        arg_map = _load_config(legacy_cli_path)
+    else:
+        arg_map = {}
+
+    # Parse CLI overrides
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token.startswith("--"):
+            key = token.lstrip("-").replace("-", "_")
+            if (i + 1) < len(argv) and not argv[i + 1].startswith("--"):
+                arg_map[key] = argv[i + 1]
+                i += 2
+            else:
+                arg_map[key] = True
+                i += 1
+        else:
+            i += 1
+
+    arg_map["__system_info__"] = _get_system_info()
+
+    if not arg_map.get("mac"):
+        arg_map["mac"] = _generate_random_mac()
+
+    if not arg_map.get("port"):
+        base_port = int(os.environ.get("LVAS_MANAGER_BASE_PORT", "6153"))
+        arg_map["port"] = str(_auto_assign_port(prefs_dir, base_port))
+
+    with open(cli_path, "w", encoding="utf-8") as file_obj:
+        json.dump(arg_map, file_obj, ensure_ascii=False, indent=4)
+    if legacy_cli_path.exists():
+        legacy_cli_path.unlink()
+
+    python_exe = "python3"
+    venv_dir = repo_dir / ".venv"
+    if venv_dir.exists():
+        context = venv.EnvBuilder().ensure_directories(venv_dir)
+        python_exe = context.env_exe
+
+    args = ["-m", "linux_voice_assistant.__main_manager__", "--name", name]
+    for key, value in arg_map.items():
+        if key.startswith("_"):
+            continue
+        if key in {"autostart"}:
+            continue
+        cli_key = f"--{key.replace('_', '-') }"
+        if isinstance(value, bool):
+            if value:
+                args.append(cli_key)
+        else:
+            args.extend([cli_key, str(value)])
+
+    subprocess.run([python_exe] + args, check=True)
+
+
+if __name__ == "__main__":
+    main()

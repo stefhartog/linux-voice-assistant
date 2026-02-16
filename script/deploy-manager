@@ -1,0 +1,395 @@
+#!/usr/bin/env python3
+"""Deploy a Linux Voice Assistant manager instance and install its service."""
+
+import json
+import os
+import platform
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Dict, Iterable, Tuple
+
+try:
+    import distro  # type: ignore
+except Exception:  # pragma: no cover
+    distro = None
+
+_SCRIPT_DIR = Path(__file__).parent
+_REPO_DIR = _SCRIPT_DIR.parent
+_PREFS_DIR = _REPO_DIR / "preferences"
+_PREFS_USER_DIR = _PREFS_DIR / "user"
+_SERVICE_DIR = Path.home() / ".config" / "systemd" / "user"
+
+
+def _current_user() -> str:
+    return os.environ.get("USER") or os.environ.get("LOGNAME") or Path.home().name
+
+
+def _ensure_user_linger(user: str) -> None:
+    if platform.system() != "Linux":
+        return
+    if shutil.which("loginctl") is None:
+        return
+    try:
+        status = subprocess.run(
+            ["loginctl", "show-user", user, "--property=Linger", "--value"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        if status.stdout.strip().lower() == "yes":
+            return
+    except Exception:
+        pass
+    try:
+        subprocess.run(["loginctl", "enable-linger", user], check=True)
+        print(f"Enabled persistent user session (linger) for '{user}'.")
+    except Exception as exc:
+        print(f"Warning: Could not enable persistent user session via loginctl: {exc}")
+
+
+def _get_system_info() -> Dict[str, str | bool | None]:
+    info: Dict[str, str | bool | None] = {
+        "os": platform.system(),
+        "machine": platform.machine(),
+        "architecture": platform.architecture()[0],
+        "distro_id": None,
+        "distro_name": None,
+        "distro_version": None,
+        "is_wsl": False,
+    }
+    if info["os"] == "Linux":
+        try:
+            if distro:
+                info["distro_id"] = distro.id()
+                info["distro_name"] = distro.name()
+                info["distro_version"] = distro.version()
+            try:
+                with open("/proc/version", "r", encoding="utf-8") as file_obj:
+                    info["is_wsl"] = "microsoft" in file_obj.read().lower()
+            except Exception:
+                info["is_wsl"] = "microsoft" in platform.uname().release.lower()
+        except Exception:
+            pass
+    return info
+
+
+def _load_json(path: Path) -> Dict:
+    try:
+        with open(path, "r", encoding="utf-8") as file_obj:
+            return json.load(file_obj) or {}
+    except Exception:
+        return {}
+
+
+def _generate_random_mac() -> str:
+    import random
+    return ":".join(f"{random.randint(0,255):02x}" for _ in range(6))
+
+
+def _auto_assign_port(user_prefs_dir: Path, base_port: int) -> int:
+    used = set()
+    for other in user_prefs_dir.glob("*_cli.json"):
+        config = _load_json(other)
+        port_val = config.get("port")
+        try:
+            if port_val not in (None, False, "false", ""):
+                used.add(int(port_val))
+        except Exception:
+            continue
+    for other in user_prefs_dir.glob("*_manager.json"):
+        config = _load_json(other)
+        port_val = config.get("port")
+        try:
+            if port_val not in (None, False, "false", ""):
+                used.add(int(port_val))
+        except Exception:
+            continue
+    for other in user_prefs_dir.glob("*_manager_cli.json"):
+        config = _load_json(other)
+        port_val = config.get("port")
+        try:
+            if port_val not in (None, False, "false", ""):
+                used.add(int(port_val))
+        except Exception:
+            continue
+    port = base_port
+    while port in used:
+        port += 1
+    return port
+
+
+def _parse_names_and_args(argv: list[str]) -> Tuple[list[str], Dict[str, str | bool], bool]:
+    names: list[str] = []
+    overrides: Dict[str, str | bool] = {}
+    auto_instance = False
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token == "--autoinstance":
+            auto_instance = True
+            i += 1
+            continue
+        if token == "--name" and i + 1 < len(argv):
+            names.append(argv[i + 1])
+            i += 2
+            continue
+        if token.startswith("--"):
+            key = token.lstrip("-").replace("-", "_")
+            if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+                overrides[key] = argv[i + 1]
+                i += 2
+            else:
+                overrides[key] = True
+                i += 1
+            continue
+        names.append(token)
+        i += 1
+    return names, overrides, auto_instance
+
+
+def _iter_instance_names() -> Iterable[str]:
+    if not _PREFS_USER_DIR.exists():
+        return []
+    names = []
+    for cli_file in _PREFS_USER_DIR.glob("*_cli.json"):
+        if cli_file.stem.endswith("_manager_cli"):
+            continue
+        names.append(cli_file.stem.replace("_cli", ""))
+    return names
+
+
+def _manager_config_path(name: str) -> Path:
+    return _PREFS_USER_DIR / f"{name}_manager.json"
+
+
+def _legacy_manager_config_path(name: str) -> Path:
+    return _PREFS_USER_DIR / f"{name}_manager_cli.json"
+
+
+def _iter_manager_names() -> Iterable[str]:
+    if not _PREFS_USER_DIR.exists():
+        return []
+    names = set()
+    for config_file in _PREFS_USER_DIR.glob("*_manager.json"):
+        names.add(config_file.stem.replace("_manager", ""))
+    for legacy_file in _PREFS_USER_DIR.glob("*_manager_cli.json"):
+        names.add(legacy_file.stem.replace("_manager_cli", ""))
+    return sorted(names)
+
+
+def _prompt_yes_no(prompt: str) -> bool:
+    while True:
+        response = input(prompt).strip().lower()
+        if response in {"y", "yes"}:
+            return True
+        if response in {"n", "no"}:
+            return False
+        print("Please answer yes or no.")
+
+
+def _rename_manager(old_name: str, new_name: str) -> None:
+    if old_name == new_name:
+        print(f"Manager already named '{new_name}'.")
+        return
+
+    old_cli = _manager_config_path(old_name)
+    legacy_old_cli = _legacy_manager_config_path(old_name)
+    new_cli = _manager_config_path(new_name)
+    legacy_new_cli = _legacy_manager_config_path(new_name)
+    if not old_cli.exists() and not legacy_old_cli.exists():
+        raise FileNotFoundError(f"Missing manager config for '{old_name}'")
+    if new_cli.exists() or legacy_new_cli.exists():
+        raise FileExistsError(f"Target manager config already exists for '{new_name}'")
+
+    old_service = _SERVICE_DIR / _get_service_name(old_name)
+    new_service = _SERVICE_DIR / _get_service_name(new_name)
+    legacy_service = _SERVICE_DIR / _get_legacy_service_name(old_name)
+
+    subprocess.run(["systemctl", "--user", "stop", _get_service_name(old_name)], check=False)
+    subprocess.run(["systemctl", "--user", "disable", _get_service_name(old_name)], check=False)
+    if legacy_service.exists():
+        subprocess.run(["systemctl", "--user", "stop", legacy_service.name], check=False)
+        subprocess.run(["systemctl", "--user", "disable", legacy_service.name], check=False)
+
+    _PREFS_USER_DIR.mkdir(parents=True, exist_ok=True)
+    _SERVICE_DIR.mkdir(parents=True, exist_ok=True)
+
+    if old_cli.exists():
+        old_cli.rename(new_cli)
+    else:
+        legacy_old_cli.rename(new_cli)
+
+    new_service.write_text(_generate_service_file(new_name), encoding="utf-8")
+    if old_service.exists():
+        old_service.unlink()
+    if legacy_service.exists():
+        legacy_service.unlink()
+
+    symlink_path = _PREFS_USER_DIR / _get_service_name(new_name)
+    if symlink_path.exists() or symlink_path.is_symlink():
+        symlink_path.unlink()
+    symlink_path.symlink_to(new_service)
+    legacy_link = _PREFS_USER_DIR / legacy_service.name
+    if legacy_link.exists() or legacy_link.is_symlink():
+        legacy_link.unlink()
+
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+    subprocess.run(["systemctl", "--user", "enable", _get_service_name(new_name)], check=True)
+    subprocess.run(["systemctl", "--user", "start", _get_service_name(new_name)], check=True)
+    print(f"Renamed manager '{old_name}' -> '{new_name}'")
+
+
+def _next_managed_name(base_name: str) -> str:
+    used = set(_iter_instance_names())
+    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        candidate = f"{base_name}_{letter}"
+        if candidate not in used:
+            return candidate
+    raise ValueError(f"No available suffix for managed instance: {base_name}")
+
+
+def _deploy_managed_instance(base_name: str) -> None:
+    instance_name = _next_managed_name(base_name)
+    deploy_script = _REPO_DIR / "script" / "deploy"
+    subprocess.run([sys.executable, str(deploy_script), instance_name], check=True)
+    print(f"Deployed managed instance: {instance_name}")
+
+
+def _ensure_manager_cli(name: str, overrides: Dict[str, str | bool], system_info: Dict[str, str | bool | None]) -> None:
+    _PREFS_USER_DIR.mkdir(parents=True, exist_ok=True)
+
+    cli_path = _manager_config_path(name)
+    legacy_cli_path = _legacy_manager_config_path(name)
+    if cli_path.exists():
+        arg_map = _load_json(cli_path)
+    elif legacy_cli_path.exists():
+        arg_map = _load_json(legacy_cli_path)
+    else:
+        arg_map = {}
+
+    arg_map.update(overrides)
+    arg_map["__system_info__"] = system_info
+
+    if not arg_map.get("mac"):
+        arg_map["mac"] = _generate_random_mac()
+
+    if "port" not in arg_map or arg_map.get("port") in (None, False, "false", ""):
+        base_port = os.environ.get("LVAS_MANAGER_BASE_PORT", "6153")
+        try:
+            base_port_int = int(base_port)
+        except Exception:
+            base_port_int = 6153
+        arg_map["port"] = str(_auto_assign_port(_PREFS_USER_DIR, base_port_int))
+
+    if arg_map.get("autostart") is None:
+        arg_map["autostart"] = True
+
+    with open(cli_path, "w", encoding="utf-8") as file_obj:
+        json.dump(arg_map, file_obj, ensure_ascii=False, indent=4)
+    if legacy_cli_path.exists():
+        legacy_cli_path.unlink()
+
+
+def _get_service_name(name: str) -> str:
+    return f"{name}_manager.service"
+
+
+def _get_legacy_service_name(name: str) -> str:
+    return f"lvas_manager_{name}.service"
+
+
+def _generate_service_file(name: str) -> str:
+    return f"""[Unit]
+Description=Linux Voice Assistant Manager - {name}
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory={_REPO_DIR}
+ExecStart={_REPO_DIR}/script/run-manager --name {name}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def _install_service(name: str, start: bool = True) -> None:
+    _SERVICE_DIR.mkdir(parents=True, exist_ok=True)
+
+    service_path = _SERVICE_DIR / _get_service_name(name)
+    with open(service_path, "w", encoding="utf-8") as file_obj:
+        file_obj.write(_generate_service_file(name))
+
+    symlink_path = _PREFS_USER_DIR / _get_service_name(name)
+    if symlink_path.exists() or symlink_path.is_symlink():
+        symlink_path.unlink()
+    symlink_path.symlink_to(service_path)
+
+    legacy_service = _SERVICE_DIR / _get_legacy_service_name(name)
+    if legacy_service.exists():
+        subprocess.run(["systemctl", "--user", "stop", legacy_service.name], check=False)
+        subprocess.run(["systemctl", "--user", "disable", legacy_service.name], check=False)
+        legacy_service.unlink()
+        legacy_link = _PREFS_USER_DIR / legacy_service.name
+        if legacy_link.exists() or legacy_link.is_symlink():
+            legacy_link.unlink()
+
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+    subprocess.run(["systemctl", "--user", "enable", _get_service_name(name)], check=True)
+    if start:
+        subprocess.run(["systemctl", "--user", "start", _get_service_name(name)], check=True)
+
+
+def main() -> None:
+    argv = sys.argv[1:]
+    if not argv:
+        print("Usage: script/deploy-manager <name> [name2 ...] [extra args]")
+        print("   or: script/deploy-manager --name <name> [--name <name2> ...] [...args]")
+        print("   or: script/deploy-manager --autoinstance --name <name> [...args]")
+        sys.exit(1)
+
+    names, overrides, auto_instance = _parse_names_and_args(argv)
+    if not names:
+        print("Error: No manager instance names provided.")
+        sys.exit(1)
+
+    manager_names = list(_iter_manager_names())
+    if manager_names:
+        if len(manager_names) > 1:
+            print("Error: Multiple managers found; rename is ambiguous:")
+            for name in sorted(manager_names):
+                print(f"  - {name}")
+            sys.exit(1)
+        if len(names) != 1:
+            print("Error: Renaming a manager requires exactly one target name.")
+            sys.exit(1)
+        existing_name = manager_names[0]
+        if existing_name != names[0]:
+            confirm = _prompt_yes_no(
+                f"A manager already exists ('{existing_name}'). Rename existing manager to '{names[0]}'? [y/n]: "
+            )
+            if confirm:
+                _rename_manager(existing_name, names[0])
+                if auto_instance:
+                    _deploy_managed_instance(names[0])
+                return
+            print("Aborted.")
+            return
+
+    system_info = _get_system_info()
+    _ensure_user_linger(_current_user())
+
+    for name in names:
+        _ensure_manager_cli(name, overrides, system_info)
+        _install_service(name)
+        print(f"Deployed manager service: {_get_service_name(name)}")
+        if auto_instance:
+            _deploy_managed_instance(name)
+
+
+if __name__ == "__main__":
+    main()

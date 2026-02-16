@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Remove one or all Linux Voice Assistant manager instances safely."""
+
+import subprocess
+import sys
+from pathlib import Path
+from typing import Set
+
+_SCRIPT_DIR = Path(__file__).parent
+_REPO_DIR = _SCRIPT_DIR.parent
+_PREFS_USER_DIR = _REPO_DIR / "preferences" / "user"
+_SERVICE_DIR = Path.home() / ".config" / "systemd" / "user"
+_DEFAULT_WANTS_DIR = _SERVICE_DIR / "default.target.wants"
+
+
+def _get_managers() -> Set[str]:
+    managers: Set[str] = set()
+    if _PREFS_USER_DIR.exists():
+        for cli_file in _PREFS_USER_DIR.glob("*_manager.json"):
+            managers.add(cli_file.stem.replace("_manager", ""))
+        for cli_file in _PREFS_USER_DIR.glob("*_manager_cli.json"):
+            managers.add(cli_file.stem.replace("_manager_cli", ""))
+    return managers
+
+
+def _parse_target_name(argv: list[str]) -> str | None:
+    target = None
+    for i, arg in enumerate(argv):
+        if arg == "--name" and i + 1 < len(argv):
+            target = argv[i + 1]
+            break
+        if not arg.startswith("-") and target is None:
+            target = arg
+    return target
+
+
+def _get_service_name(name: str) -> str:
+    return f"{name}_manager.service"
+
+
+def _get_legacy_service_name(name: str) -> str:
+    return f"lvas_manager_{name}.service"
+
+
+def _remove_manager(name: str) -> tuple[int, int, int]:
+    service_name = _get_service_name(name)
+    legacy_service_name = _get_legacy_service_name(name)
+    service_path = _SERVICE_DIR / service_name
+    legacy_service_path = _SERVICE_DIR / legacy_service_name
+    wants_link = _DEFAULT_WANTS_DIR / service_name
+    legacy_wants_link = _DEFAULT_WANTS_DIR / legacy_service_name
+
+    subprocess.run(["systemctl", "--user", "disable", service_name], check=False)
+    subprocess.run(["systemctl", "--user", "stop", service_name], check=False)
+    subprocess.run(["systemctl", "--user", "disable", legacy_service_name], check=False)
+    subprocess.run(["systemctl", "--user", "stop", legacy_service_name], check=False)
+
+    services_removed = 0
+    wants_removed = 0
+    prefs_removed = 0
+
+    if wants_link.exists() or wants_link.is_symlink():
+        try:
+            wants_link.unlink()
+            wants_removed += 1
+        except Exception:
+            pass
+    if legacy_wants_link.exists() or legacy_wants_link.is_symlink():
+        try:
+            legacy_wants_link.unlink()
+            wants_removed += 1
+        except Exception:
+            pass
+
+    if service_path.exists():
+        try:
+            service_path.unlink()
+            services_removed += 1
+        except Exception:
+            pass
+    if legacy_service_path.exists():
+        try:
+            legacy_service_path.unlink()
+            services_removed += 1
+        except Exception:
+            pass
+
+    prefs_service_link = _PREFS_USER_DIR / service_name
+    legacy_prefs_link = _PREFS_USER_DIR / legacy_service_name
+    if prefs_service_link.exists() or prefs_service_link.is_symlink():
+        try:
+            prefs_service_link.unlink()
+        except Exception:
+            pass
+    if legacy_prefs_link.exists() or legacy_prefs_link.is_symlink():
+        try:
+            legacy_prefs_link.unlink()
+        except Exception:
+            pass
+
+    cli_json = _PREFS_USER_DIR / f"{name}_manager.json"
+    legacy_json = _PREFS_USER_DIR / f"{name}_manager_cli.json"
+    for file_path in (cli_json, legacy_json):
+        if file_path.exists():
+            try:
+                file_path.unlink()
+                prefs_removed += 1
+            except Exception:
+                pass
+
+    return services_removed, wants_removed, prefs_removed
+
+
+def main() -> None:
+    argv = sys.argv[1:]
+    target = _parse_target_name(argv)
+
+    managers = _get_managers()
+    if target:
+        managers = {i for i in managers if i == target}
+        if not managers:
+            print(f"Manager '{target}' not found.")
+            return
+    if not managers:
+        print("No managers found to remove.")
+        return
+
+    names_list = ", ".join(sorted(managers))
+    confirm = input(
+        f"About to stop and remove {len(managers)} manager(s): {names_list}. Type 'yes' to continue: "
+    ).strip().lower()
+    if confirm != "yes":
+        print("Aborted.")
+        return
+
+    total_services = 0
+    total_wants = 0
+    total_prefs = 0
+    for name in managers:
+        s, w, p = _remove_manager(name)
+        total_services += s
+        total_wants += w
+        total_prefs += p
+
+    if total_services or total_wants:
+        subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+
+    print(
+        f"Removed {len(managers)} manager(s); "
+        f"service files deleted: {total_services}, wants links removed: {total_wants}, prefs deleted: {total_prefs}."
+    )
+
+
+if __name__ == "__main__":
+    main()
