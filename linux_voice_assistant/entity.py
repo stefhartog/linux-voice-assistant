@@ -247,6 +247,7 @@ class ButtonEntity(ESPHomeEntity):
         object_id: str,
         on_press: Optional[Callable[[], None]] = None,
         icon: Optional[str] = None,
+        entity_category: int = 0,
     ) -> None:
         super().__init__(server)
         self.key = key
@@ -254,6 +255,7 @@ class ButtonEntity(ESPHomeEntity):
         self.object_id = object_id
         self.on_press = on_press
         self.icon = icon
+        self.entity_category = entity_category
 
     def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
         if isinstance(msg, ButtonCommandRequest) and (msg.key == self.key):
@@ -270,6 +272,7 @@ class ButtonEntity(ESPHomeEntity):
                 key=self.key,
                 name=self.name,
                 icon=self.icon,
+                entity_category=self.entity_category,
             )
         return []
 
@@ -284,6 +287,7 @@ class SelectEntity(ESPHomeEntity):
         options: List[str],
         initial_state: str,
         on_change: Optional[Callable[[str], None]] = None,
+        entity_category: int = 0,
     ) -> None:
         super().__init__(server)
         self.key = key
@@ -292,6 +296,7 @@ class SelectEntity(ESPHomeEntity):
         self.options = options
         self.state = initial_state
         self.on_change = on_change
+        self.entity_category = entity_category
 
     def set_state(self, new_state: str) -> SelectStateResponse:
         self.state = new_state
@@ -312,6 +317,7 @@ class SelectEntity(ESPHomeEntity):
                 key=self.key,
                 name=self.name,
                 options=self.options,
+                entity_category=self.entity_category,
             )
         elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
             yield self._get_state_message()

@@ -54,5 +54,5 @@ zip-safe  = true
 include-package-data = true
 
 [tool.setuptools.packages.find]
-include = ["linux_voice_assistant"]
+include = ["linux_voice_assistant", "bluetooth"]
 exclude = ["tests", "tests.*"]

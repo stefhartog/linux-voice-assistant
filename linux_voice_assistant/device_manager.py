@@ -21,8 +21,9 @@ from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]
 )
 from google.protobuf import message
 
+from bluetooth import BlueZHelper
+
 from .api_server import APIServer
-from .bluetooth import BlueZHelper
 from .entity import ButtonEntity, ESPHomeEntity, SelectEntity, SwitchEntity, TextAttributeEntity
 
 _LOGGER = logging.getLogger(__name__)
@@ -50,6 +51,7 @@ class DeviceManager:
         self._instance_switches: Dict[str, SwitchEntity] = {}
         self._instance_status_sensors: Dict[str, TextAttributeEntity] = {}
         self._instance_remove_buttons: Dict[str, ButtonEntity] = {}
+        self._instance_restart_buttons: Dict[str, ButtonEntity] = {}
         self._mute_switch: Optional[SwitchEntity] = None
         self._bluetooth_helper: Optional[BlueZHelper] = None
         self._bluetooth_devices_text = ""
@@ -95,6 +97,7 @@ class DeviceManager:
             object_id="bluetooth_scan",
             on_press=self._scan_bluetooth,
             icon="mdi:bluetooth",
+            entity_category=1,  # CONFIG
         )
         self.entities.append(self.bluetooth_scan_button)
 
@@ -105,6 +108,7 @@ class DeviceManager:
             object_id="bluetooth_refresh",
             on_press=self._refresh_bluetooth,
             icon="mdi:bluetooth-settings",
+            entity_category=1,  # CONFIG
         )
         self.entities.append(self.bluetooth_refresh_button)
 
@@ -117,6 +121,7 @@ class DeviceManager:
             object_id="bluetooth_forget_all",
             on_press=self._forget_all_bluetooth,
             icon="mdi:bluetooth-off",
+            entity_category=1,  # CONFIG
         )
         self.entities.append(self.bluetooth_forget_all_button)
 
@@ -135,6 +140,7 @@ class DeviceManager:
         self._add_instance_switches()
         self._add_instance_status_sensors()
         self._add_instance_remove_buttons()
+        self._add_instance_restart_buttons()
 
     def _add_text(self, name: str, object_id: str) -> TextAttributeEntity:
         sensor = TextAttributeEntity(
@@ -178,6 +184,7 @@ class DeviceManager:
         messages.extend(self._refresh_instance_status_sensors())
         messages.extend(self._refresh_instance_switches())
         self._add_instance_remove_buttons()
+        self._add_instance_restart_buttons()
         messages.extend(self._refresh_mute_switch())
 
         if self.protocol is not None:
@@ -311,6 +318,22 @@ class DeviceManager:
             self.entities.append(button)
             self._instance_remove_buttons[name] = button
 
+    def _add_instance_restart_buttons(self) -> None:
+        for cli_file in self._iter_instance_cli_files():
+            name = cli_file.stem.replace("_cli", "")
+            if name in self._instance_restart_buttons:
+                continue
+            button = ButtonEntity(
+                server=self,  # type: ignore[arg-type]
+                key=len(self.entities),
+                name=f"{name} Restart",
+                object_id=f"{_slugify(name)}_restart",
+                on_press=lambda target=name: self._restart_instance(target),
+                icon="mdi:restart",
+            )
+            self.entities.append(button)
+            self._instance_restart_buttons[name] = button
+
     def _add_mute_switch(self) -> None:
         if self._mute_switch is not None:
             return
@@ -345,6 +368,7 @@ class DeviceManager:
             options=self._bluetooth_device_options,
             initial_state="none",
             on_change=self._pair_selected_bluetooth,
+            entity_category=1,  # CONFIG
         )
         self.entities.append(self._bluetooth_device_select)
 
@@ -404,7 +428,6 @@ class DeviceManager:
             )
         except Exception:
             _LOGGER.exception("Failed to remove VA instance: %s", name)
-
     def _set_shared_mute(self, enabled: bool) -> None:
         _LOGGER.info("Setting shared mute: %s", enabled)
         try:
@@ -413,6 +436,12 @@ class DeviceManager:
             )
         except Exception:
             _LOGGER.exception("Failed to write shared mute flag")
+    def _restart_instance(self, name: str) -> None:
+        _LOGGER.info("Restarting VA instance: %s", name)
+        try:
+            subprocess.Popen([str(self.config.restart_script), "--name", name])
+        except Exception:
+            _LOGGER.exception("Failed to restart VA instance: %s", name)
 
     def _restart_services(self) -> None:
         _LOGGER.info("Restarting VA services via %s", self.config.restart_script)

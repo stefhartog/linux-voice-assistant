@@ -183,7 +183,9 @@ async def main() -> None:
             player = MPV()
             for speaker in player.audio_device_list:  # type: ignore
                 name = speaker.get("name")
-                if name and name not in options:
+                # Only include pulse/ devices (PulseAudio/PipeWire)
+                # Skip alsa/, jack, sdl, sndio, and other backends
+                if name and name.startswith("pulse/") and name not in options:
                     options.append(name)
         except Exception:
             pass
