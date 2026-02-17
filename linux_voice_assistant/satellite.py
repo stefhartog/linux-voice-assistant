@@ -23,6 +23,7 @@ from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]
     ListEntitiesDoneResponse,
     ListEntitiesRequest,
     MediaPlayerCommandRequest,
+    SelectCommandRequest,
     SwitchCommandRequest,
     SubscribeHomeAssistantStatesRequest,
     VoiceAssistantAnnounceFinished,
@@ -47,7 +48,7 @@ from pymicro_wakeword import MicroWakeWord
 from pyopen_wakeword import OpenWakeWord
 
 from .api_server import APIServer
-from .entity import ButtonEntity, MediaPlayerEntity, TextAttributeEntity, SwitchEntity
+from .entity import ButtonEntity, MediaPlayerEntity, TextAttributeEntity, SwitchEntity, SelectEntity
 from .models import AvailableWakeWord, ServerState, WakeWordType
 from .util import call_all
 
@@ -196,6 +197,36 @@ class VoiceSatelliteProtocol(APIServer):
             )
             self.state.entities.append(self.state.restart_entity)
 
+        if self.state.input_device_entity is None and self.state.audio_input_device_options:
+            def _on_input_select(value: str) -> None:
+                self._update_cli_config("audio_input_device", value)
+
+            self.state.input_device_entity = SelectEntity(
+                server=self,
+                key=len(state.entities),
+                name="Audio Input Device",
+                object_id="audio_input_device",
+                options=self.state.audio_input_device_options,
+                initial_state=self.state.audio_input_device_selected or "auto",
+                on_change=_on_input_select,
+            )
+            self.state.entities.append(self.state.input_device_entity)
+
+        if self.state.output_device_entity is None and self.state.audio_output_device_options:
+            def _on_output_select(value: str) -> None:
+                self._update_cli_config("audio_output_device", value)
+
+            self.state.output_device_entity = SelectEntity(
+                server=self,
+                key=len(state.entities),
+                name="Audio Output Device",
+                object_id="audio_output_device",
+                options=self.state.audio_output_device_options,
+                initial_state=self.state.audio_output_device_selected or "auto",
+                on_change=_on_output_select,
+            )
+            self.state.entities.append(self.state.output_device_entity)
+
         self._is_streaming_audio = False
         self._tts_url: Optional[str] = None
         self._tts_played = False
@@ -234,6 +265,27 @@ class VoiceSatelliteProtocol(APIServer):
             subprocess.Popen([str(script_path)])
         except Exception:
             _LOGGER.exception("Failed to restart LVA services")
+
+    def _update_cli_config(self, key: str, value: str) -> None:
+        path = self.state.cli_config_path
+        data: Dict[str, object] = {}
+        try:
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            _LOGGER.debug("Failed to read CLI config %s", path, exc_info=True)
+            data = {}
+
+        if value == "auto":
+            data.pop(key, None)
+        else:
+            data[key] = value
+
+        try:
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=4), encoding="utf-8")
+            _LOGGER.info("Updated %s in %s to %s (applies on restart)", key, path, value)
+        except Exception:
+            _LOGGER.exception("Failed to update CLI config %s", path)
 
 
     def handle_voice_event(
@@ -355,6 +407,7 @@ class VoiceSatelliteProtocol(APIServer):
                 SubscribeHomeAssistantStatesRequest,
                 MediaPlayerCommandRequest,
                 ButtonCommandRequest,
+                SelectCommandRequest,
                 SwitchCommandRequest,
             ),
         ):

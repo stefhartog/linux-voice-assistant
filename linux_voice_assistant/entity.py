@@ -8,10 +8,13 @@ from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]
     ListEntitiesMediaPlayerResponse,
     ListEntitiesButtonResponse,
     ListEntitiesRequest,
+    ListEntitiesSelectResponse,
     ListEntitiesTextSensorResponse,
     ListEntitiesSwitchResponse,
     MediaPlayerCommandRequest,
     MediaPlayerStateResponse,
+    SelectCommandRequest,
+    SelectStateResponse,
     SwitchCommandRequest,
     SwitchStateResponse,
     SubscribeHomeAssistantStatesRequest,
@@ -269,3 +272,52 @@ class ButtonEntity(ESPHomeEntity):
                 icon=self.icon,
             )
         return []
+
+
+class SelectEntity(ESPHomeEntity):
+    def __init__(
+        self,
+        server: APIServer,
+        key: int,
+        name: str,
+        object_id: str,
+        options: List[str],
+        initial_state: str,
+        on_change: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        super().__init__(server)
+        self.key = key
+        self.name = name
+        self.object_id = object_id
+        self.options = options
+        self.state = initial_state
+        self.on_change = on_change
+
+    def set_state(self, new_state: str) -> SelectStateResponse:
+        self.state = new_state
+        return self._get_state_message()
+
+    def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
+        if isinstance(msg, SelectCommandRequest) and (msg.key == self.key):
+            self.state = msg.state
+            if self.on_change:
+                try:
+                    self.on_change(self.state)
+                except Exception:
+                    raise
+            yield self._get_state_message()
+        elif isinstance(msg, ListEntitiesRequest):
+            yield ListEntitiesSelectResponse(
+                object_id=self.object_id,
+                key=self.key,
+                name=self.name,
+                options=self.options,
+            )
+        elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
+            yield self._get_state_message()
+
+    def _get_state_message(self) -> SelectStateResponse:
+        return SelectStateResponse(
+            key=self.key,
+            state=self.state,
+        )

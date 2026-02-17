@@ -4,6 +4,7 @@ import asyncio
 import logging
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
@@ -14,13 +15,15 @@ from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]
     DeviceInfoResponse,
     ListEntitiesRequest,
     ListEntitiesDoneResponse,
+    SelectCommandRequest,
     SubscribeHomeAssistantStatesRequest,
     SwitchCommandRequest,
 )
 from google.protobuf import message
 
 from .api_server import APIServer
-from .entity import ButtonEntity, ESPHomeEntity, SwitchEntity, TextAttributeEntity
+from .bluetooth import BlueZHelper
+from .entity import ButtonEntity, ESPHomeEntity, SelectEntity, SwitchEntity, TextAttributeEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -48,6 +51,12 @@ class DeviceManager:
         self._instance_status_sensors: Dict[str, TextAttributeEntity] = {}
         self._instance_remove_buttons: Dict[str, ButtonEntity] = {}
         self._mute_switch: Optional[SwitchEntity] = None
+        self._bluetooth_helper: Optional[BlueZHelper] = None
+        self._bluetooth_devices_text = ""
+        self._bluetooth_refresh_at = 0.0
+        self._bluetooth_device_select: Optional[SelectEntity] = None
+        self._bluetooth_device_options: List[str] = ["none"]
+        self._bluetooth_device_map: Dict[str, str] = {}
 
         self.cpu_sensor = self._add_text("System CPU", "system_cpu")
         self.temp_sensor = self._add_text("System Temp", "system_temp")
@@ -55,6 +64,9 @@ class DeviceManager:
         self.disk_sensor = self._add_text("System Disk", "system_disk")
         self.squeezelite_sensor = self._add_text("Squeezelite Status", "squeezelite_status")
         self.led_feedback_sensor = self._add_text("LED Feedback Status", "led_feedback_status")
+        self.bluetooth_devices_sensor = self._add_text(
+            "Bluetooth Devices", "bluetooth_devices"
+        )
 
         self.restart_button = ButtonEntity(
             server=self,  # type: ignore[arg-type]
@@ -75,6 +87,38 @@ class DeviceManager:
             icon="mdi:plus-box",
         )
         self.entities.append(self.deploy_button)
+
+        self.bluetooth_scan_button = ButtonEntity(
+            server=self,  # type: ignore[arg-type]
+            key=len(self.entities),
+            name="Bluetooth Scan",
+            object_id="bluetooth_scan",
+            on_press=self._scan_bluetooth,
+            icon="mdi:bluetooth",
+        )
+        self.entities.append(self.bluetooth_scan_button)
+
+        self.bluetooth_refresh_button = ButtonEntity(
+            server=self,  # type: ignore[arg-type]
+            key=len(self.entities),
+            name="Bluetooth Refresh",
+            object_id="bluetooth_refresh",
+            on_press=self._refresh_bluetooth,
+            icon="mdi:bluetooth-settings",
+        )
+        self.entities.append(self.bluetooth_refresh_button)
+
+        self._add_bluetooth_select()
+
+        self.bluetooth_forget_all_button = ButtonEntity(
+            server=self,  # type: ignore[arg-type]
+            key=len(self.entities),
+            name="Bluetooth Forget All",
+            object_id="bluetooth_forget_all",
+            on_press=self._forget_all_bluetooth,
+            icon="mdi:bluetooth-off",
+        )
+        self.entities.append(self.bluetooth_forget_all_button)
 
         self._add_mute_switch()
 
@@ -111,6 +155,7 @@ class DeviceManager:
 
     def start_updates(self) -> None:
         asyncio.create_task(self._update_loop())
+        asyncio.create_task(self._autoconnect_bluetooth_audio())
 
     async def _update_loop(self) -> None:
         while True:
@@ -128,6 +173,8 @@ class DeviceManager:
         messages.append(self.disk_sensor.update(self._disk_usage()))
         messages.append(self.squeezelite_sensor.update(_systemd_unit_status("squeezelite.service")))
         messages.append(self.led_feedback_sensor.update(_systemd_unit_status("led_feedback.service")))
+        messages.append(self.bluetooth_devices_sensor.update(self._bluetooth_devices_text or "n/a"))
+        messages.extend(self._refresh_bluetooth_select())
         messages.extend(self._refresh_instance_status_sensors())
         messages.extend(self._refresh_instance_switches())
         self._add_instance_remove_buttons()
@@ -287,6 +334,47 @@ class DeviceManager:
             return [self._mute_switch.set_state(desired)]
         return []
 
+    def _add_bluetooth_select(self) -> None:
+        if self._bluetooth_device_select is not None:
+            return
+        self._bluetooth_device_select = SelectEntity(
+            server=self,  # type: ignore[arg-type]
+            key=len(self.entities),
+            name="Bluetooth Device",
+            object_id="bluetooth_device",
+            options=self._bluetooth_device_options,
+            initial_state="none",
+            on_change=self._pair_selected_bluetooth,
+        )
+        self.entities.append(self._bluetooth_device_select)
+
+    def _refresh_bluetooth_select(self) -> List[message.Message]:
+        if self._bluetooth_device_select is None:
+            return []
+        if self._bluetooth_device_select.options != self._bluetooth_device_options:
+            self._bluetooth_device_select.options = list(self._bluetooth_device_options)
+        if self._bluetooth_device_select.state not in self._bluetooth_device_options:
+            return [self._bluetooth_device_select.set_state("none")]
+        return []
+
+    def _scan_bluetooth(self) -> None:
+        asyncio.create_task(self._scan_and_refresh_bluetooth())
+
+    def _refresh_bluetooth(self) -> None:
+        asyncio.create_task(self._update_bluetooth_devices())
+
+    def _forget_all_bluetooth(self) -> None:
+        asyncio.create_task(self._forget_all_devices())
+
+    def _pair_selected_bluetooth(self, option: str) -> None:
+        if option == "none":
+            return
+        device_path = self._bluetooth_device_map.get(option)
+        if not device_path:
+            _LOGGER.warning("Bluetooth selection not found: %s", option)
+            return
+        asyncio.create_task(self._pair_selected_device(device_path))
+
     def _refresh_instance_switches(self) -> List[message.Message]:
         messages: List[message.Message] = []
         for cli_file in self._iter_instance_cli_files():
@@ -377,9 +465,98 @@ class DeviceManager:
         except Exception:
             _LOGGER.exception("Failed to restart manager service")
 
+    async def _ensure_bluetooth(self) -> Optional[BlueZHelper]:
+        if self._bluetooth_helper is not None:
+            return self._bluetooth_helper
+        try:
+            self._bluetooth_helper = await BlueZHelper.create()
+            return self._bluetooth_helper
+        except Exception:
+            _LOGGER.exception("Failed to initialize BlueZ helper")
+            return None
+
+    async def _scan_and_refresh_bluetooth(self) -> None:
+        helper = await self._ensure_bluetooth()
+        if helper is None:
+            self._bluetooth_devices_text = "unavailable"
+            return
+        try:
+            await helper.scan(8.0)
+        except Exception:
+            _LOGGER.exception("Bluetooth scan failed")
+        await self._update_bluetooth_devices(force=True)
+
+    async def _pair_selected_device(self, device_path: str) -> None:
+        helper = await self._ensure_bluetooth()
+        if helper is None:
+            self._bluetooth_devices_text = "unavailable"
+            return
+        try:
+            await helper.pair_trust_connect(device_path)
+        except Exception:
+            _LOGGER.exception("Bluetooth pair/connect failed")
+        await self._update_bluetooth_devices(force=True)
+
+    async def _update_bluetooth_devices(self, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now < self._bluetooth_refresh_at:
+            return
+        helper = await self._ensure_bluetooth()
+        if helper is None:
+            self._bluetooth_devices_text = "unavailable"
+            return
+        try:
+            device_entries = await helper.list_devices_with_paths(audio_only=True)
+            devices = [info for _, info in device_entries]
+            self._bluetooth_devices_text = _format_bt_devices(devices)
+            options: List[str] = ["none"]
+            mapping: Dict[str, str] = {}
+            for path, info in device_entries:
+                option = f"{info.name} [{info.address}]"
+                options.append(option)
+                mapping[option] = path
+            self._bluetooth_device_options = options
+            self._bluetooth_device_map = mapping
+        except Exception:
+            _LOGGER.exception("Bluetooth device list failed")
+            self._bluetooth_devices_text = "unavailable"
+        self._bluetooth_refresh_at = now + 5.0
+
+    async def _forget_all_devices(self) -> None:
+        helper = await self._ensure_bluetooth()
+        if helper is None:
+            self._bluetooth_devices_text = "unavailable"
+            return
+        try:
+            device_entries = await helper.list_devices_with_paths(audio_only=True)
+            for path, info in device_entries:
+                if info.paired or info.connected:
+                    await helper.remove_device(path)
+        except Exception:
+            _LOGGER.exception("Bluetooth forget all failed")
+        await self._update_bluetooth_devices(force=True)
+
     async def _restart_manager_after_delay(self, delay_seconds: float) -> None:
         await asyncio.sleep(delay_seconds)
         self._restart_manager()
+
+    async def _autoconnect_bluetooth_audio(self) -> None:
+        await asyncio.sleep(2.0)
+        helper = await self._ensure_bluetooth()
+        if helper is None:
+            return
+        try:
+            device_entries = await helper.list_devices_with_paths(audio_only=True)
+            for path, info in device_entries:
+                if info.paired and not info.connected:
+                    try:
+                        await helper.connect_device(path)
+                    except Exception:
+                        _LOGGER.exception(
+                            "Bluetooth autoconnect failed: %s", info.address
+                        )
+        except Exception:
+            _LOGGER.exception("Bluetooth autoconnect failed")
 
 
 class DeviceManagerProtocol(APIServer):
@@ -412,6 +589,7 @@ class DeviceManagerProtocol(APIServer):
                 ListEntitiesRequest,
                 SubscribeHomeAssistantStatesRequest,
                 ButtonCommandRequest,
+                SelectCommandRequest,
                 SwitchCommandRequest,
             ),
         ):
@@ -485,3 +663,18 @@ def _systemd_unit_status(unit: str) -> str:
         return status if status else "unknown"
     except Exception:
         return "unknown"
+
+
+def _format_bt_devices(devices: List["BluetoothDeviceInfo"]) -> str:
+    if not devices:
+        return "none"
+    parts = []
+    for device in devices:
+        flags = []
+        if device.connected:
+            flags.append("connected")
+        if device.paired:
+            flags.append("paired")
+        suffix = f" ({', '.join(flags)})" if flags else ""
+        parts.append(f"{device.name} [{device.address}]{suffix}")
+    return ", ".join(parts)

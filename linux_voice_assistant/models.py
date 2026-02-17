@@ -85,6 +85,11 @@ class ServerState:
     preferences_path: Path
     global_preferences_path: Path
     download_dir: Path
+    cli_config_path: Path
+    audio_input_device_options: List[str] = field(default_factory=list)
+    audio_output_device_options: List[str] = field(default_factory=list)
+    audio_input_device_selected: Optional[str] = None
+    audio_output_device_selected: Optional[str] = None
 
     media_player_entity: "Optional[MediaPlayerEntity]" = None
     active_tts_entity: "Optional[TextAttributeEntity]" = None
@@ -101,6 +106,8 @@ class ServerState:
     mute_entity: "Optional[ESPHomeEntity]" = None
     listen_entity: "Optional[ESPHomeEntity]" = None
     restart_entity: "Optional[ESPHomeEntity]" = None
+    input_device_entity: "Optional[ESPHomeEntity]" = None
+    output_device_entity: "Optional[ESPHomeEntity]" = None
 
     def save_preferences(self) -> None:
         """Save per-instance preferences (currently active wake words)."""

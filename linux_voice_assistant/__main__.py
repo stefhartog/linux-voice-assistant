@@ -14,7 +14,6 @@ import numpy as np
 import soundcard as sc
 from pymicro_wakeword import MicroWakeWord, MicroWakeWordFeatures
 from pyopen_wakeword import OpenWakeWord, OpenWakeWordFeatures
-
 from .models import (
     AvailableWakeWord,
     GlobalPreferences,
@@ -124,9 +123,9 @@ async def main() -> None:
     args, remaining = parser.parse_known_args()
     
     # Load CLI config from last run if it exists (to use as defaults)
+    user_prefs_dir = _REPO_DIR / "preferences" / "user"
+    cli_config_path = user_prefs_dir / f"{args.name}_cli.json"
     if args.name:
-        user_prefs_dir = _REPO_DIR / "preferences" / "user"
-        cli_config_path = user_prefs_dir / f"{args.name}_cli.json"
         if cli_config_path.exists():
             try:
                 with open(cli_config_path, "r", encoding="utf-8") as f:
@@ -166,6 +165,52 @@ async def main() -> None:
 
     args.download_dir = Path(args.download_dir)
     args.download_dir.mkdir(parents=True, exist_ok=True)
+
+    def _build_input_device_options() -> List[str]:
+        options = ["auto"]
+        try:
+            for mic in sc.all_microphones():
+                options.append(mic.name)
+        except Exception:
+            pass
+        return options
+
+    def _build_output_device_options() -> List[str]:
+        options = ["auto"]
+        try:
+            from mpv import MPV
+
+            player = MPV()
+            for speaker in player.audio_device_list:  # type: ignore
+                name = speaker.get("name")
+                if name and name not in options:
+                    options.append(name)
+        except Exception:
+            pass
+        return options
+
+    def _resolve_selected_device(
+        value: Optional[object],
+        options: List[str],
+        index_map: Optional[List[str]] = None,
+    ) -> str:
+        if value is None:
+            return "auto"
+        if isinstance(value, int) and index_map:
+            if 0 <= value < len(index_map):
+                value = index_map[value]
+        selected = str(value)
+        return selected if selected in options else "auto"
+
+    input_device_options = _build_input_device_options()
+    input_device_names = input_device_options[1:]
+    output_device_options = _build_output_device_options()
+    selected_input = _resolve_selected_device(
+        args.audio_input_device, input_device_options, input_device_names
+    )
+    selected_output = _resolve_selected_device(
+        args.audio_output_device, output_device_options
+    )
 
     # Resolve microphone
     mic: Optional[sc.Microphone] = None
@@ -383,8 +428,13 @@ async def main() -> None:
         global_preferences=global_preferences,
         preferences_path=preferences_path,
         global_preferences_path=global_preferences_path,
-        refractory_seconds=args.refractory_seconds,
         download_dir=args.download_dir,
+        cli_config_path=cli_config_path,
+        audio_input_device_options=input_device_options,
+        audio_output_device_options=output_device_options,
+        audio_input_device_selected=selected_input,
+        audio_output_device_selected=selected_output,
+        refractory_seconds=args.refractory_seconds,
         screen_management=args.screen_management,
         disable_wakeword_during_tts=args.disable_wakeword_during_tts,
         software_mute=False,
