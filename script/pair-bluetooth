@@ -1,0 +1,985 @@
+#!/usr/bin/env python3
+"""CLI tool to pair Bluetooth audio devices."""
+
+import asyncio
+import logging
+import sys
+import subprocess
+import venv
+from pathlib import Path
+
+_DIR = Path(__file__).parent
+_PROGRAM_DIR = _DIR.parent
+_VENV_DIR = _PROGRAM_DIR / ".venv"
+_VENV_PYTHON = _VENV_DIR / "bin" / "python3"
+
+# Setup logging
+logging.basicConfig(level=logging.WARNING)
+_LOGGER = logging.getLogger(__name__)
+
+
+def _ensure_venv():
+    """Ensure venv is set up and this script runs within it."""
+    # Check if we're already in the venv
+    if hasattr(sys, "real_prefix") or (
+        hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix
+    ):
+        # We're in a venv, proceed
+        return
+    
+    # Check if venv exists
+    if not _VENV_DIR.exists():
+        print("Virtual environment not found.")
+        print(f"Please run: {_PROGRAM_DIR}/script/setup")
+        sys.exit(1)
+    
+    # Rerun this script within the venv
+    result = subprocess.run(
+        [str(_VENV_PYTHON), __file__] + sys.argv[1:],
+        cwd=_PROGRAM_DIR
+    )
+    sys.exit(result.returncode)
+
+
+def _check_dependencies():
+    """Check if required dependencies are installed."""
+    try:
+        import dbus_next  # noqa: F401
+    except ImportError:
+        print("❌ Missing dependency: dbus-next")
+        print(f"Please run: {_PROGRAM_DIR}/script/setup")
+        sys.exit(1)
+
+
+_ensure_venv()
+_check_dependencies()
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(_PROGRAM_DIR))
+
+from bluetooth import BlueZHelper
+
+
+async def main():
+    """Main CLI for Bluetooth pairing."""
+    try:
+        helper = await BlueZHelper.create()
+    except Exception as e:
+        print(f"❌ Failed to connect to BlueZ: {e}")
+        print("Ensure BlueZ is running and you have D-Bus system access")
+        return 1
+
+    while True:
+        print("\n📱 Bluetooth Device Pairing Tool")
+        print("=" * 50)
+        print("1. Scan for devices")
+        print("2. List discovered devices")
+        print("3. Pair/connect to a device")
+        print("4. Set device to headset mode (enable mic)")
+        print("5. Check device profiles & force HFP")
+        print("6. Check audio devices in PulseAudio")
+        print("7. Diagnose HFP/Microphone issues")
+        print("8. Disconnect from a device")
+        print("9. Remove (unpair) a device")
+        print("11. Test microphone input")
+        print("10. Exit")
+        
+        choice = input("\nSelect option (1-11, 10=exit): ").strip()
+        
+        if choice == "1":
+            await scan_devices(helper)
+        elif choice == "2":
+            await list_devices(helper)
+        elif choice == "3":
+            await pair_device(helper)
+        elif choice == "4":
+            await set_headset_mode(helper)
+        elif choice == "5":
+            await check_and_force_hfp()
+        elif choice == "6":
+            await check_audio_devices()
+        elif choice == "7":
+            await diagnose_hfp_issues()
+        elif choice == "8":
+            await disconnect_device(helper)
+        elif choice == "9":
+            await remove_device(helper)
+        elif choice == "11":
+            await test_microphone()
+        elif choice == "10":
+            print("👋 Goodbye!")
+            return 0
+        else:
+            print("❌ Invalid option")
+
+
+
+async def scan_devices(helper: BlueZHelper):
+    """Scan for nearby Bluetooth devices and list all discovered devices."""
+    print("\n🔍 Scanning for devices (10 seconds)...")
+    try:
+        await helper.scan(duration_seconds=10)
+        print("✅ Scan complete!")
+        
+        # List all discovered devices (not just audio)
+        # Note: many audio devices don't advertise audio UUIDs until after pairing
+        print("\n📋 Discovered Devices:")
+        devices = await helper.list_devices(audio_only=False)
+        if not devices:
+            print("  No devices found.")
+        else:
+            for i, device in enumerate(devices, 1):
+                status = []
+                if device.paired:
+                    status.append("✓ paired")
+                if device.connected:
+                    status.append("✓ connected")
+                status_str = " | ".join(status) if status else "unpaired"
+                print(f"  {i}. {device.name}")
+                print(f"     Address: {device.address}")
+                print(f"     Status: {status_str}")
+        
+        print("\n💡 Tip: Audio devices may not advertise until after pairing")
+    except Exception as e:
+        print(f"❌ Scan failed: {e}")
+
+
+async def list_devices(helper: BlueZHelper):
+    """List all discovered devices."""
+    print("\n📋 Discovered Devices:")
+    try:
+        devices = await helper.list_devices(audio_only=False)
+        if not devices:
+            print("  No devices found. Try scanning first.")
+            return
+        
+        for i, device in enumerate(devices, 1):
+            status = []
+            if device.paired:
+                status.append("✓ paired")
+            if device.connected:
+                status.append("✓ connected")
+            status_str = " | ".join(status) if status else "unpaired"
+            print(f"  {i}. {device.name}")
+            print(f"     Address: {device.address}")
+            print(f"     Status: {status_str}")
+    except Exception as e:
+        print(f"❌ Failed to list devices: {e}")
+
+
+async def pair_device(helper: BlueZHelper):
+    """Pair and connect to a selected device using bluetoothctl."""
+    try:
+        devices_with_paths = await helper.list_devices_with_paths(audio_only=False)
+        if not devices_with_paths:
+            print("❌ No devices found. Scan first.")
+            return
+        
+        print("\n📋 Available devices:")
+        for i, (_, device) in enumerate(devices_with_paths, 1):
+            status = "paired" if device.paired else "unpaired"
+            print(f"  {i}. {device.name} ({device.address}) - {status}")
+        
+        selection = input("\nSelect device number to pair: ").strip()
+        try:
+            idx = int(selection) - 1
+            if idx < 0 or idx >= len(devices_with_paths):
+                print("❌ Invalid selection")
+                return
+        except ValueError:
+            print("❌ Invalid input")
+            return
+        
+        device_path, device = devices_with_paths[idx]
+        mac_address = device.address
+        
+        print(f"\n⏳ Pairing with {device.name} ({mac_address})...")
+        print("   Make sure the device is in pairing mode!")
+        print("   (Usually hold pairing button for 3-5 seconds)")
+        print()
+        
+        # Use bluetoothctl for pairing (handles D-Bus agent automatically)
+        try:
+            # Trust the device
+            result = subprocess.run(
+                ["bluetoothctl", "trust", mac_address],
+                capture_output=True,
+                timeout=5
+            )
+            if result.returncode != 0:
+                _LOGGER.warning(f"Trust command failed: {result.stderr.decode()}")
+            
+            # Pair the device
+            result = subprocess.run(
+                ["bluetoothctl", "pair", mac_address],
+                capture_output=True,
+                timeout=30,
+                text=True
+            )
+            
+            if result.returncode != 0:
+                error_msg = result.stderr.decode() if isinstance(result.stderr, bytes) else result.stderr
+                if "Authentication Rejected" in error_msg:
+                    print(f"❌ Pairing rejected - device may have declined the pairing request")
+                    print("   Make sure device is in pairing mode and retry")
+                elif "Connection Rejected" in error_msg or "Not Paired" in error_msg:
+                    print(f"❌ Connection failed - ensure device is in pairing mode")
+                else:
+                    print(f"❌ Pairing failed: {error_msg.strip()}")
+                return
+            
+            # Connect the device
+            result = subprocess.run(
+                ["bluetoothctl", "connect", mac_address],
+                capture_output=True,
+                timeout=15,
+                text=True
+            )
+            
+            if result.returncode == 0:
+                print(f"✅ Successfully paired and connected to {device.name}!")
+                await asyncio.sleep(1)
+                
+                # Verify pairing
+                updated = await helper.list_devices()
+                for dev in updated:
+                    if dev.address == mac_address and dev.paired:
+                        return
+                print(f"   (Connected, verify in Home Assistant)")
+            else:
+                print(f"⚠️  Device paired but connection may have issues")
+                print(f"   The device should still work")
+                
+        except subprocess.TimeoutExpired:
+            print(f"❌ Pairing timed out - ensure device is still in pairing mode")
+        except FileNotFoundError:
+            print(f"❌ bluetoothctl not found")
+            print(f"   Install BlueZ tools: sudo apt-get install bluez")
+        except Exception as e:
+            print(f"❌ Pairing failed: {e}")
+            print("\n⚠️  Troubleshooting tips:")
+            print("   1. Make sure the device is in pairing/discovery mode")
+            print("   2. Hold the pairing button for 3-5 seconds until LED blinks")
+            print("   3. Ensure Bluetooth is enabled on your device")
+            print("   4. Try scanning again to find the device")
+            print("   5. Check if bluetoothctl is installed: which bluetoothctl")
+            
+    except Exception as e:
+            print(f"❌ Pairing failed: {e}")
+            print("\n⚠️  Troubleshooting tips:")
+            print("   1. Make sure the device is in pairing/discovery mode")
+            print("   2. Hold the pairing button for 3-5 seconds until LED blinks")
+            print("   3. Ensure Bluetooth is enabled on your device")
+            print("   4. Try scanning again to find the device")
+            print("   5. Check if bluetoothctl is installed: which bluetoothctl")
+            
+    except Exception as e:
+        print(f"❌ Pairing failed: {e}")
+
+
+
+async def set_headset_mode(helper: BlueZHelper):
+    """Set a Bluetooth device to headset mode to enable microphone."""
+    try:
+        # Get paired devices
+        devices = await helper.list_devices()
+        paired_devices = [d for d in devices if d.paired]
+        
+        if not paired_devices:
+            print("❌ No paired devices found. Pair a device first.")
+            return
+        
+        print("\n📋 Paired devices:")
+        for i, device in enumerate(paired_devices, 1):
+            status = "connected" if device.connected else "disconnected"
+            print(f"  {i}. {device.name} ({device.address}) - {status}")
+        
+        selection = input("\nSelect device number to set to headset mode: ").strip()
+        try:
+            idx = int(selection) - 1
+            if idx < 0 or idx >= len(paired_devices):
+                print("❌ Invalid selection")
+                return
+        except ValueError:
+            print("❌ Invalid input")
+            return
+        
+        device = paired_devices[idx]
+        mac_address = device.address
+        
+        print(f"\n⏳ Setting {device.name} to headset mode...")
+        print(f"   This enables the microphone via HFP/HSP profile...")
+        
+        # THE KEY FIX: Switch to headset-head-unit profile!
+        # This is what was missing - the device is on a2dp-sink by default
+        # We need to switch it to headset-head-unit to enable HFP/HSP
+        
+        pactl_device = mac_address.replace(':', '_')
+        card_name = f"bluez_card.{pactl_device}"
+        
+        print(f"   Switching profile to HFP (Handsfree)...")
+        
+        # Try the most common HFP profile names
+        hfp_profiles = [
+            "handsfree_head_unit",    # PulseAudio naming
+            "headset-head-unit",      # Alternative naming
+            "headset_head_unit",      # Snake case variant
+            "hfp",                    # Generic name
+        ]
+        
+        profile_switched = False
+        for profile in hfp_profiles:
+            profile_result = subprocess.run(
+                ["pactl", "set-card-profile", card_name, profile],
+                capture_output=True,
+                timeout=10,
+                text=True
+            )
+            
+            if profile_result.returncode == 0:
+                print(f"   ✅ Profile switched to: {profile}")
+                profile_switched = True
+                await asyncio.sleep(1)
+                break
+        
+        if not profile_switched:
+            print(f"   ⚠️  Could not switch profile automatically")
+            print(f"      Profile may need manual switching or PulseAudio restart")
+        
+        # RESTART PULSEAUDIO to make it reload the profile
+        print(f"\n   Restarting PulseAudio to apply changes...")
+        subprocess.run(
+            ["pulseaudio", "-k"],
+            capture_output=True,
+            timeout=5
+        )
+        await asyncio.sleep(1)
+        subprocess.run(
+            ["pulseaudio", "--start"],
+            capture_output=True,
+            timeout=5
+        )
+        print(f"   ✅ PulseAudio restarted")
+        await asyncio.sleep(2)
+        
+        # Get device info to check profiles
+        info_result = subprocess.run(
+            ["bluetoothctl", "info", mac_address],
+            capture_output=True,
+            timeout=5,
+            text=True
+        )
+        
+        info_text = info_result.stdout
+        
+        # Connect if not already connected
+        if not device.connected:
+            print(f"   Connecting device...")
+            connect_result = subprocess.run(
+                ["bluetoothctl", "connect", mac_address],
+                capture_output=True,
+                timeout=15,
+                text=True
+            )
+            if connect_result.returncode != 0:
+                print(f"   ⚠️  Connection warning: {connect_result.stderr.strip()}")
+            else:
+                print(f"   ✓ Connected")
+            await asyncio.sleep(1)
+        
+        # Now check available profiles with pactl
+        print(f"\n   Available PulseAudio profiles:")
+        profiles_result = subprocess.run(
+            ["pactl", "list", "cards"],
+            capture_output=True,
+            timeout=5,
+            text=True
+        )
+        
+        if profiles_result.returncode == 0:
+            # Parse the cards output to find available profiles
+            in_card = False
+            for line in profiles_result.stdout.split('\n'):
+                if card_name in line or f"bluez_card.{pactl_device}" in line:
+                    in_card = True
+                if in_card:
+                    if "Profiles:" in line:
+                        print(f"   {line.strip()}")
+                    elif in_card and (line.startswith('\t\t') or line.startswith('  ')):
+                        if "headset" in line.lower() or "hfp" in line.lower() or "hsp" in line.lower():
+                            print(f"   {line.strip()}")
+                    elif line.startswith('Card #') and "bluez_card" not in line:
+                        break
+        
+        # Set as default in PulseAudio/PipeWire
+        print(f"\n   Setting as default audio input/output...")
+        
+        # Try pactl (PulseAudio) - note: pactl_device was already set above
+        sink_result = subprocess.run(
+            ["pactl", "set-default-sink", f"bluez_sink.{pactl_device}"],
+            capture_output=True,
+            timeout=5
+        )
+        source_result = subprocess.run(
+            ["pactl", "set-default-source", f"bluez_source.{pactl_device}"],
+            capture_output=True,
+            timeout=5
+        )
+        
+        success = False
+        if sink_result.returncode == 0:
+            print(f"   ✓ Set as default output (speaker)")
+            success = True
+        if source_result.returncode == 0:
+            print(f"   ✓ Set as default input (microphone)")
+            success = True
+        
+        if not success:
+            print(f"   ℹ️  Audio settings may be managed by your system")
+            print(f"      Check Settings > Sound for Bluetooth device selection")
+        
+        print(f"\n✅ {device.name} is now in headset mode!")
+        print(f"   Ready for voice input and audio output")
+        
+    except subprocess.TimeoutExpired:
+        print(f"❌ Operation timed out")
+    except FileNotFoundError:
+        print(f"❌ Required tool not found")
+        print(f"   Install BlueZ tools: sudo apt-get install bluez")
+    except Exception as e:
+        print(f"❌ Headset mode setup failed: {e}")
+
+
+async def check_and_force_hfp():
+    """Check device profiles and force HFP (Hands-Free Profile) if available."""
+    print("\n📋 Device Profiles & HFP Configuration")
+    print("=" * 50)
+    
+    try:
+        # List devices using bluetoothctl
+        result = subprocess.run(
+            ["bluetoothctl", "devices"],
+            capture_output=True,
+            timeout=5,
+            text=True
+        )
+        
+        if result.returncode != 0:
+            print("❌ Failed to list devices")
+            return
+        
+        devices = []
+        for line in result.stdout.strip().split('\n'):
+            if line.startswith('Device'):
+                # Format: Device MAC_WITH_COLONS NAME_WITH_DASHES
+                parts = line.replace('Device ', '').split(' ', 1)
+                if len(parts) == 2:
+                    address = parts[0]  # MAC with colons
+                    name = parts[1]      # Name with dashes
+                    devices.append((address, name))
+        
+        if not devices:
+            print("❌ No devices found - scan first with option 1")
+            return
+        
+        print("\n📱 Available Devices:")
+        for i, (address, name) in enumerate(devices, 1):
+            print(f"  {i}. {name} ({address})")
+        
+        selection = input("\nSelect device number to check: ").strip()
+        try:
+            idx = int(selection) - 1
+            if idx < 0 or idx >= len(devices):
+                print("❌ Invalid selection")
+                return
+        except ValueError:
+            print("❌ Invalid input")
+            return
+        
+        mac_address, device_name = devices[idx]
+        
+        print(f"\n🔍 Checking profiles for {device_name}...")
+        
+        # Get full device info
+        info_result = subprocess.run(
+            ["bluetoothctl", "info", mac_address],
+            capture_output=True,
+            timeout=5,
+            text=True
+        )
+        
+        if info_result.returncode != 0:
+            print(f"❌ Failed to get device info")
+            return
+        
+        info_text = info_result.stdout
+        
+        # Parse UUIDs to see what profiles are supported
+        has_hfp = False
+        has_hsp = False
+        has_a2dp = False
+        
+        for line in info_text.split('\n'):
+            if 'UUID' in line:
+                uuid_part = line.split('UUID:')[-1].strip().lower()
+                # HFP/HSP UUIDs
+                if '0000111f' in uuid_part or '111f' in uuid_part:
+                    has_hfp = True
+                if ('00001108' in uuid_part or '1108' in uuid_part or
+                    '00001112' in uuid_part or '1112' in uuid_part):
+                    has_hsp = True
+                if '0000110b' in uuid_part or '110b' in uuid_part:
+                    has_a2dp = True
+        
+        print(f"\n📊 Device Capabilities:")
+        print(f"  A2DP (Audio Output): {'✅' if has_a2dp else '❌'}")
+        print(f"  HFP/HSP (Microphone): {'✅' if (has_hfp or has_hsp) else '❌'}")
+        
+        if not has_hfp and not has_hsp:
+            print(f"\n⚠️  Device doesn't advertise HFP/HSP profiles!")
+            print(f"   This may be a speaker-only device, or the profiles aren't loaded yet.")
+        else:
+            # Try to reload profiles by reconnecting
+            print(f"\n⏳ Attempting to activate HFP/HSP profiles...")
+            
+            # Disconnect first
+            print(f"   Disconnecting...")
+            subprocess.run(
+                ["bluetoothctl", "disconnect", mac_address],
+                capture_output=True,
+                timeout=10,
+                text=True
+            )
+            await asyncio.sleep(1)
+            
+            # Reconnect to load all profiles
+            print(f"   Reconnecting...")
+            connect_result = subprocess.run(
+                ["bluetoothctl", "connect", mac_address],
+                capture_output=True,
+                timeout=15,
+                text=True
+            )
+            
+            if connect_result.returncode == 0:
+                print(f"✅ Reconnected!")
+                await asyncio.sleep(2)
+                
+                # Check if HFP source appeared
+                pactl_check = subprocess.run(
+                    ["pactl", "list", "sources"],
+                    capture_output=True,
+                    timeout=5,
+                    text=True
+                )
+                
+                if "bluez" in pactl_check.stdout.lower():
+                    print(f"\n✅ HFP Microphone source detected!")
+                    # List sources containing bluez
+                    for line in pactl_check.stdout.split('\n'):
+                        if 'bluez' in line.lower():
+                            if 'name' in line.lower() or 'source' in line.lower():
+                                print(f"   {line.strip()}")
+                else:
+                    print(f"\n⚠️  HFP microphone not yet visible")
+                    print(f"   Try option 6 again to refresh")
+            else:
+                print(f"   Reconnection may have issues")
+            
+    except subprocess.TimeoutExpired:
+        print("❌ Command timed out")
+    except FileNotFoundError:
+        print("❌ bluetoothctl not found")
+        print("   Install BlueZ: sudo apt-get install bluez")
+    except Exception as e:
+        print(f"❌ Error: {e}")
+
+
+async def diagnose_hfp_issues():
+    """Diagnose why Bluetooth HFP microphone isn't showing up."""
+    print("\n🔧 Bluetooth HFP Microphone Diagnosis")
+    print("=" * 50)
+    
+    try:
+        # Check BlueZ configuration
+        print("\n1️⃣ Checking BlueZ Configuration...")
+        bluez_conf = "/etc/bluetooth/main.conf"
+        
+        if Path(bluez_conf).exists():
+            with open(bluez_conf, 'r') as f:
+                config_text = f.read()
+            
+            # Check for key settings
+            if "Enable=true" in config_text or "# Enable=" in config_text:
+                print("   ✅ Audio profiles appear enabled")
+            else:
+                print("   ⚠️  Check if audio profiles are enabled in /etc/bluetooth/main.conf")
+            
+            if "GATT=true" in config_text or "# GATT=" in config_text:
+                print("   ✅ GATT support appears enabled")
+        else:
+            print("   ℹ️  BlueZ main.conf not found (using defaults)")
+        
+        # Check PulseAudio
+        print("\n2️⃣ Checking PulseAudio...")
+        
+        pactl_result = subprocess.run(
+            ["pactl", "list", "modules"],
+            capture_output=True,
+            timeout=5,
+            text=True
+        )
+        
+        if pactl_result.returncode == 0:
+            modules_text = pactl_result.stdout
+            
+            if "module-bluetooth" in modules_text.lower():
+                print("   ✅ PulseAudio Bluetooth module loaded")
+            else:
+                print("   ❌ PulseAudio Bluetooth module NOT loaded!")
+                print("      FIX: Install pulseaudio-module-bluetooth")
+                print("      sudo apt-get install pulseaudio-module-bluetooth")
+            
+            if "a2dp-codec-sbc" in modules_text.lower() or "bluez5" in modules_text.lower():
+                print("   ✅ BlueZ5 audio codec support detected")
+            else:
+                print("   ⚠️  BlueZ5 audio codec support may be missing")
+        else:
+            print("   ⚠️  Could not check PulseAudio modules")
+        
+        # Check PulseAudio config
+        print("\n3️⃣ Checking PulseAudio Configuration...")
+        
+        pulse_conf = Path.home() / ".config/pulse/default.pa"
+        if pulse_conf.exists():
+            with open(pulse_conf, 'r') as f:
+                pulse_text = f.read()
+            if "bluetooth" in pulse_text.lower():
+                print("   ✅ Bluetooth configuration found in pulse config")
+            else:
+                print("   ⚠️  No Bluetooth configuration in ~/.config/pulse/default.pa")
+        else:
+            print("   ℹ️  Using system PulseAudio config")
+        
+        # Check if pulseaudio-module-bluetooth is installed
+        print("\n4️⃣ Checking Installed Packages...")
+        
+        dpkg_result = subprocess.run(
+            ["dpkg", "-l"],
+            capture_output=True,
+            timeout=5,
+            text=True
+        )
+        
+        if dpkg_result.returncode == 0:
+            packages = dpkg_result.stdout
+            
+            if "pulseaudio-module-bluetooth" in packages:
+                print("   ✅ pulseaudio-module-bluetooth installed")
+            else:
+                print("   ❌ pulseaudio-module-bluetooth NOT installed!")
+                print("      This is likely the problem!")
+                print("      FIX: sudo apt-get install pulseaudio-module-bluetooth")
+            
+            if "bluez" in packages and "bluez-tools" in packages:
+                print("   ✅ BlueZ tools installed")
+            else:
+                print("   ⚠️  Some BlueZ packages may be missing")
+                print("      Try: sudo apt-get install bluez bluez-tools")
+        
+        # Summary and fixes
+        print("\n" + "=" * 50)
+        print("✅ QUICK FIX to enable Bluetooth microphone:")
+        print("=" * 50)
+        print("\n1. Install required package:")
+        print("   sudo apt-get install pulseaudio-module-bluetooth")
+        print("\n2. Restart PulseAudio:")
+        print("   pulseaudio -k")
+        print("   pulseaudio --start")
+        print("\n3. Disconnect and reconnect your device:")
+        print("   Use option 7 (Disconnect)")
+        print("   Then option 5 (Check profiles & force HFP)")
+        print("\n4. Check if microphone appeared:")
+        print("   Use option 6 (Check audio devices)")
+        
+        print("\n" + "=" * 50)
+        print("📚 More info:")
+        print("- https://wiki.debian.org/BluetoothHSP")
+        print("- Check /var/log/syslog for BlueZ errors")
+        
+    except Exception as e:
+        print(f"❌ Diagnosis error: {e}")
+
+
+async def check_audio_devices():
+    """Check available audio input/output devices in PulseAudio/PipeWire."""
+    print("\n🔊 Audio Devices Check")
+    print("=" * 50)
+    
+    try:
+        # Try PulseAudio first
+        result = subprocess.run(
+            ["pactl", "list", "sources"],
+            capture_output=True,
+            timeout=5,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            print("\n📥 Available Audio Input (Microphone) Devices:")
+            print("-" * 50)
+            
+            lines = result.stdout.split('\n')
+            current_device = None
+            current_name = None
+            in_properties = False
+            
+            for line in lines:
+                if line.startswith('Source #'):
+                    if current_device and current_name:
+                        print(f"  • {current_name}")
+                    current_device = line.strip()
+                elif line.startswith('\tName:'):
+                    current_name = line.split('Name:')[1].strip()
+                    if 'bluetooth' in current_name.lower():
+                        print(f"  🔵 {current_name} [Bluetooth]")
+                    elif current_name and not current_device:
+                        current_device = current_name
+            
+            if current_device and current_name:
+                if 'bluetooth' in current_name.lower():
+                    print(f"  🔵 {current_name} [Bluetooth]")
+                else:
+                    print(f"  • {current_name}")
+            
+            # Check sinks (output)
+            result = subprocess.run(
+                ["pactl", "list", "sinks"],
+                capture_output=True,
+                timeout=5,
+                text=True
+            )
+            
+            if result.returncode == 0:
+                print("\n📤 Available Audio Output (Speaker) Devices:")
+                print("-" * 50)
+                
+                lines = result.stdout.split('\n')
+                for line in lines:
+                    if line.strip().startswith('Name:'):
+                        name = line.split('Name:')[1].strip()
+                        if 'bluetooth' in name.lower():
+                            print(f"  🔵 {name} [Bluetooth]")
+                        elif name:
+                            print(f"  • {name}")
+            
+            # Check defaults
+            print("\n⚙️  Current Default Devices:")
+            print("-" * 50)
+            
+            default_sink_result = subprocess.run(
+                ["pactl", "get-default-sink"],
+                capture_output=True,
+                timeout=5,
+                text=True
+            )
+            if default_sink_result.returncode == 0:
+                default_sink = default_sink_result.stdout.strip()
+                is_bt = "bluez" in default_sink.lower()
+                print(f"  Output: {default_sink} {'🔵 [Bluetooth]' if is_bt else ''}")
+            
+            default_source_result = subprocess.run(
+                ["pactl", "get-default-source"],
+                capture_output=True,
+                timeout=5,
+                text=True
+            )
+            if default_source_result.returncode == 0:
+                default_source = default_source_result.stdout.strip()
+                is_bt = "bluez" in default_source.lower()
+                print(f"  Input: {default_source} {'🔵 [Bluetooth]' if is_bt else ''}")
+                
+                if "bluez" not in default_source.lower():
+                    print(f"\n⚠️  Bluetooth microphone is NOT the default input!")
+                    print(f"   Use option 4 (Set headset mode) to make it default")
+            
+        else:
+            print("❌ PulseAudio not available, trying PipeWire...")
+            # Try wpctl for PipeWire
+            pw_result = subprocess.run(
+                ["wpctl", "status"],
+                capture_output=True,
+                timeout=5,
+                text=True
+            )
+            if pw_result.returncode == 0:
+                print("\n📊 PipeWire Devices:")
+                print(pw_result.stdout)
+            else:
+                print("❌ Neither PulseAudio nor PipeWire detected")
+                print("   Install PulseAudio: sudo apt-get install pulseaudio")
+                
+    except subprocess.TimeoutExpired:
+        print("❌ Command timed out")
+    except FileNotFoundError:
+        print("❌ Audio tools not found")
+        print("   Install PulseAudio: sudo apt-get install pulseaudio")
+    except Exception as e:
+        print(f"❌ Error checking audio devices: {e}")
+
+
+async def disconnect_device(helper: BlueZHelper):
+    """Disconnect from a paired device."""
+    try:
+        devices = await helper.list_devices()
+        connected_devices = [d for d in devices if d.connected]
+        
+        if not connected_devices:
+            print("❌ No connected devices")
+            return
+        
+        print("\n📋 Connected devices:")
+        for i, device in enumerate(connected_devices, 1):
+            print(f"  {i}. {device.name} ({device.address})")
+        
+        selection = input("\nSelect device number to disconnect: ").strip()
+        try:
+            idx = int(selection) - 1
+            if idx < 0 or idx >= len(connected_devices):
+                print("❌ Invalid selection")
+                return
+        except ValueError:
+            print("❌ Invalid input")
+            return
+        
+        device = connected_devices[idx]
+        # Note: BlueZ doesn't have a direct disconnect method in our helper,
+        # but providing the option for future implementation
+        print(f"⚠️  Disconnect feature not yet implemented")
+        print(f"   Use 'bluetoothctl' command: disconnect {device.address}")
+    except Exception as e:
+        print(f"❌ Failed: {e}")
+
+
+async def remove_device(helper: BlueZHelper):
+    """Remove (unpair) a device."""
+    try:
+        devices_with_paths = await helper.list_devices_with_paths()
+        if not devices_with_paths:
+            print("❌ No devices found")
+            return
+        
+        print("\n📋 Paired devices:")
+        for i, (_, device) in enumerate(devices_with_paths, 1):
+            print(f"  {i}. {device.name} ({device.address})")
+        
+        selection = input("\nSelect device number to remove: ").strip()
+        try:
+            idx = int(selection) - 1
+            if idx < 0 or idx >= len(devices_with_paths):
+                print("❌ Invalid selection")
+                return
+        except ValueError:
+            print("❌ Invalid input")
+            return
+        
+        device_path, device = devices_with_paths[idx]
+        confirm = input(f"⚠️  Remove {device.name}? (yes/no): ").strip().lower()
+        if confirm != "yes":
+            print("❌ Cancelled")
+            return
+        
+        await helper.remove_device(device_path)
+        print(f"✅ Successfully removed {device.name}")
+    except Exception as e:
+        print(f"❌ Failed to remove device: {e}")
+
+
+async def test_microphone():
+    """Test the Bluetooth microphone by recording and playing back audio."""
+    from tempfile import NamedTemporaryFile
+    import time
+    
+    try:
+        # Get the default input device
+        result = subprocess.run(
+            ["pactl", "get-default-source"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        if result.returncode != 0:
+            print("❌ Could not get default audio input device")
+            return
+        
+        default_input = result.stdout.strip()
+        
+        # Check if Bluetooth device is selected
+        if "bluez" not in default_input.lower():
+            print(f"⚠️  Current input is not a Bluetooth device: {default_input}")
+            print("   Make sure to run option 4 first to set the Bluetooth device as default")
+            return
+        
+        print(f"\n🎤 Testing microphone: {default_input}")
+        print("   Recording for 3 seconds... speak now!")
+        
+        # Create a temp file for recording
+        with NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            temp_file = tmp.name
+        
+        try:
+            # Record 3 seconds of audio
+            record_proc = subprocess.Popen(
+                ["parecord", "--format=s16le", "--rate=16000", "--channels=1", temp_file],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            
+            await asyncio.sleep(3)
+            record_proc.terminate()
+            
+            # Wait for process to finish
+            try:
+                record_proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                record_proc.kill()
+            
+            # Check if file has data
+            file_size = Path(temp_file).stat().st_size
+            if file_size < 100:
+                print("❌ Recording failed - no audio data captured")
+                print("   The microphone may not be working properly")
+            else:
+                print(f"✅ Recording successful ({file_size} bytes)")
+                print("   Playing back recording...")
+                
+                # Play back the recording
+                play_proc = subprocess.run(
+                    ["paplay", "--device", "@DEFAULT_AUDIO_SINK@", temp_file],
+                    capture_output=True,
+                    timeout=5
+                )
+                
+                if play_proc.returncode == 0:
+                    print("✅ Playback successful - microphone is working!")
+                else:
+                    print("⚠️  Playback failed, but recording was captured")
+        
+        finally:
+            # Clean up temp file
+            try:
+                Path(temp_file).unlink()
+            except:
+                pass
+    
+    except FileNotFoundError as e:
+        print(f"❌ Required audio tool not found: {e}")
+        print("   Install PulseAudio tools: sudo apt install pulseaudio-utils")
+    except Exception as e:
+        print(f"❌ Microphone test failed: {e}")
+
+
+if __name__ == "__main__":
+    exit_code = asyncio.run(main())
+    sys.exit(exit_code if exit_code is not None else 0)
