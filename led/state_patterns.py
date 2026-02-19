@@ -1,4 +1,4 @@
-BRIGHTNESS = 0.1 # 10% brightness (change this value to adjust overall brightness)
+BRIGHTNESS = 0.2 # 10% brightness (change this value to adjust overall brightness)
 import spidev
 import time
 import math

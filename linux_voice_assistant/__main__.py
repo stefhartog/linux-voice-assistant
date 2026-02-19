@@ -450,6 +450,27 @@ async def main() -> None:
     except Exception:
         _LOGGER.debug("Could not read shared mute state", exc_info=True)
 
+    # Warm up MPV players to avoid 1-1.5 second startup delay on first wake word
+    # by doing a dummy play/stop cycle
+    import time as time_module
+    try:
+        _LOGGER.debug("Pre-warming MPV players...")
+        # Create a tiny silent WAV file for warm-up (just need to wake up the audio device)
+        warmup_wav = "/tmp/lvas_warmup_silent.wav"
+        if not Path(warmup_wav).exists():
+            # Minimal 16-bit PCM WAV header (22 bytes) + minimal audio data
+            # This is a valid tiny WAV file with just 2 samples at 16kHz
+            with open(warmup_wav, "wb") as f:
+                f.write(bytes.fromhex(
+                    "524946461a000000574156456664746100000000010002004031000040020004001000"
+                    "6461746106000000000000000000"
+                ))
+        state.tts_player.play(warmup_wav)
+        time_module.sleep(0.1)  # Let it start
+        state.tts_player.stop()
+        _LOGGER.debug("MPV pre-warming complete")
+    except Exception as e:
+        _LOGGER.debug("Could not pre-warm MPV: %s", e)
 
     process_audio_thread = threading.Thread(
         target=process_audio,

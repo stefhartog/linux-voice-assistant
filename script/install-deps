@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Install system dependencies for Linux Voice Assistant."""
 
+import os
 import shutil
 import subprocess
 import sys
@@ -12,11 +13,13 @@ PACKAGES_APT = [
     "build-essential",
     "libmpv-dev",
     "python3-spidev",
-    "python3-dev"
+    "python3-dev",
+    "pulseaudio",
+    "pulseaudio-utils"
 ]
-PACKAGES_DNF = ["python3-virtualenv", "portaudio-devel", "gcc", "gcc-c++", "make", "mpv-libs-devel"]
-PACKAGES_PACMAN = ["python-virtualenv", "portaudio", "base-devel", "mpv"]
-PACKAGES_ZYPPER = ["python3-virtualenv", "portaudio-devel", "gcc", "gcc-c++", "make", "libmpv-devel"]
+PACKAGES_DNF = ["python3-virtualenv", "portaudio-devel", "gcc", "gcc-c++", "make", "mpv-libs-devel", "pulseaudio", "pulseaudio-utils"]
+PACKAGES_PACMAN = ["python-virtualenv", "portaudio", "base-devel", "mpv", "pulseaudio"]
+PACKAGES_ZYPPER = ["python3-virtualenv", "portaudio-devel", "gcc", "gcc-c++", "make", "libmpv-devel", "pulseaudio", "pulseaudio-utils"]
 
 
 def detect_package_manager():
@@ -74,6 +77,91 @@ def main():
     try:
         subprocess.run(cmd, check=True)
         print("\n✓ System dependencies installed successfully!")
+        
+        # Enable and start PulseAudio user service
+        print("\nEnabling PulseAudio...")
+        try:
+            subprocess.run(["systemctl", "--user", "enable", "pulseaudio.service"], 
+                          check=False, capture_output=True)
+            subprocess.run(["systemctl", "--user", "start", "pulseaudio.service"], 
+                          check=False, capture_output=True)
+            # Fallback: start PulseAudio directly if systemd service fails
+            subprocess.run(["pulseaudio", "--check"], check=False, capture_output=True)
+            result = subprocess.run(["pulseaudio", "--check"], capture_output=True)
+            if result.returncode != 0:
+                subprocess.run(["pulseaudio", "--start"], check=False, capture_output=True)
+            print("✓ PulseAudio enabled and started")
+            
+            # Disable suspend-on-idle to prevent USB audio devices from sleeping
+            print("Configuring PulseAudio to disable audio device auto-suspend...")
+            home_dir = os.path.expanduser("~")
+            pulse_config_dir = os.path.join(home_dir, ".config", "pulse")
+            pulse_config_file = os.path.join(pulse_config_dir, "default.pa")
+            
+            # Create pulse config directory if it doesn't exist
+            os.makedirs(pulse_config_dir, exist_ok=True)
+            
+            # Copy system default config to user config
+            if not os.path.exists(pulse_config_file):
+                subprocess.run(["cp", "/etc/pulse/default.pa", pulse_config_file], 
+                              check=False, capture_output=True)
+            
+            # Disable suspend-on-idle module
+            subprocess.run([
+                "sed", "-i", 
+                "s/^load-module module-suspend-on-idle/# load-module module-suspend-on-idle # Disabled for voice assistant/",
+                pulse_config_file
+            ], check=False, capture_output=True)
+            
+            # Restart PulseAudio to apply changes
+            subprocess.run(["pulseaudio", "--kill"], check=False, capture_output=True)
+            subprocess.run(["pulseaudio", "--start"], check=False, capture_output=True)
+            print("✓ PulseAudio configured (audio devices won't auto-suspend)")
+            
+        except Exception as e:
+            print(f"Note: Could not auto-start PulseAudio (may need manual start): {e}")
+        
+        # Create udev rule to disable USB autosuspend for audio devices
+        print("\nConfiguring USB autosuspend for audio devices...")
+        try:
+            udev_rule_content = """# Disable USB autosuspend for audio devices (Linux Voice Assistant)
+# This prevents audio delay when devices wake from suspend
+
+# Disable autosuspend for all USB audio devices
+ACTION=="add", SUBSYSTEM=="usb", ATTR{bInterfaceClass}=="01", ATTR{power/control}="on"
+
+# Specific rule for Anker PowerConf (if generic rule doesn't apply)
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="291a", ATTR{idProduct}=="3301", ATTR{power/control}="on"
+"""
+            
+            udev_rule_file = "/etc/udev/rules.d/90-usb-audio-autosuspend.rules"
+            
+            # Write udev rule (requires sudo)
+            with open("/tmp/90-usb-audio-autosuspend.rules", "w") as f:
+                f.write(udev_rule_content)
+            
+            result = subprocess.run(
+                ["sudo", "cp", "/tmp/90-usb-audio-autosuspend.rules", udev_rule_file],
+                capture_output=True
+            )
+            
+            if result.returncode == 0:
+                # Reload udev rules
+                subprocess.run(["sudo", "udevadm", "control", "--reload-rules"], 
+                              check=False, capture_output=True)
+                subprocess.run(["sudo", "udevadm", "trigger", "--subsystem-match=usb"], 
+                              check=False, capture_output=True)
+                print("✓ USB autosuspend disabled for audio devices")
+            else:
+                print("Note: Could not create udev rule (may need manual configuration)")
+            
+            # Clean up temp file
+            subprocess.run(["rm", "/tmp/90-usb-audio-autosuspend.rules"], 
+                          check=False, capture_output=True)
+            
+        except Exception as e:
+            print(f"Note: Could not configure USB autosuspend (may need manual setup): {e}")
+        
         print("\nNext steps:")
         print("  1. Run: script/setup")
         print("  2. Run: script/run --name MyVA")

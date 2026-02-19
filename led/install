@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""Install LED Feedback Service for Linux Voice Assistant."""
+
+import os
+import sys
+import subprocess
+import shutil
+from pathlib import Path
+
+# Paths
+SCRIPT_DIR = Path(__file__).parent.absolute()
+PROJECT_ROOT = SCRIPT_DIR.parent
+VENV_PYTHON = PROJECT_ROOT / ".venv" / "bin" / "python3"
+VENV_PIP = PROJECT_ROOT / ".venv" / "bin" / "pip"
+SERVICE_FILE = Path.home() / ".config" / "systemd" / "user" / "led_feedback.service"
+LED_FEEDBACK_PY = SCRIPT_DIR / "led_feedback.py"
+SPI_DEVICE = "/dev/spidev1.0"
+
+
+def check_spi():
+    """Check if SPI device is available."""
+    print("Checking SPI device availability...")
+    if not Path(SPI_DEVICE).exists():
+        print(f"⚠️  SPI device {SPI_DEVICE} not found!")
+        print("\nTo enable SPI:")
+        print("  - Raspberry Pi: Use raspi-config")
+        print("  - Orange Pi: Use armbian-config or edit /boot/armbianEnv.txt")
+        print("  - Add overlays: spi-spidev")
+        response = input("\nContinue anyway? (y/N): ")
+        if response.lower() != 'y':
+            print("Installation cancelled.")
+            sys.exit(1)
+    else:
+        print(f"✓ SPI device found: {SPI_DEVICE}")
+
+
+def check_venv():
+    """Check if virtual environment exists."""
+    print("\nChecking virtual environment...")
+    if not VENV_PYTHON.exists():
+        print(f"✗ Virtual environment not found at {PROJECT_ROOT / '.venv'}")
+        print("\nPlease run: script/setup")
+        sys.exit(1)
+    print(f"✓ Virtual environment found")
+
+
+def install_spidev():
+    """Install spidev Python package."""
+    print("\nInstalling spidev package...")
+    try:
+        subprocess.run(
+            [str(VENV_PIP), "install", "spidev"],
+            check=True,
+            capture_output=True
+        )
+        print("✓ spidev installed")
+    except subprocess.CalledProcessError as e:
+        print(f"✗ Failed to install spidev: {e}")
+        print(e.stderr.decode() if e.stderr else "")
+        sys.exit(1)
+
+
+def setup_spi_permissions():
+    """Set up SPI device permissions via udev rule and spi group."""
+    print("\nConfiguring SPI device permissions...")
+    
+    # Create spi group if it doesn't exist
+    try:
+        subprocess.run(["sudo", "groupadd", "-f", "spi"], check=True, capture_output=True)
+        print("✓ Created spi group")
+    except subprocess.CalledProcessError:
+        print("✗ Failed to create spi group")
+        return
+    
+    # Add current user to spi group
+    try:
+        import getpass
+        username = getpass.getuser()
+        subprocess.run(
+            ["sudo", "usermod", "-a", "-G", "spi", username],
+            check=True,
+            capture_output=True
+        )
+        print(f"✓ Added {username} to spi group")
+    except subprocess.CalledProcessError:
+        print("✗ Failed to add user to spi group")
+        return
+    
+    # Create udev rule
+    udev_rule = """# Allow members of spi group to access SPI devices
+SUBSYSTEM=="spidev", GROUP="spi", MODE="0660"
+"""
+    
+    udev_rule_file = "/etc/udev/rules.d/99-spi-permissions.rules"
+    temp_rule_file = "/tmp/99-spi-permissions.rules"
+    
+    try:
+        Path(temp_rule_file).write_text(udev_rule)
+        subprocess.run(
+            ["sudo", "cp", temp_rule_file, udev_rule_file],
+            check=True,
+            capture_output=True
+        )
+        print(f"✓ Created udev rule: {udev_rule_file}")
+        
+        # Reload udev rules
+        subprocess.run(
+            ["sudo", "udevadm", "control", "--reload-rules"],
+            check=False,
+            capture_output=True
+        )
+        subprocess.run(
+            ["sudo", "udevadm", "trigger", "--subsystem-match=spidev"],
+            check=False,
+            capture_output=True
+        )
+        
+        # Set permissions manually for immediate effect
+        if Path(SPI_DEVICE).exists():
+            subprocess.run(
+                ["sudo", "chgrp", "spi", SPI_DEVICE],
+                check=False,
+                capture_output=True
+            )
+            subprocess.run(
+                ["sudo", "chmod", "660", SPI_DEVICE],
+                check=False,
+                capture_output=True
+            )
+            print(f"✓ Updated {SPI_DEVICE} permissions")
+        
+        # Clean up
+        Path(temp_rule_file).unlink(missing_ok=True)
+        
+        print("\n⚠️  IMPORTANT: You must log out and log back in (or reboot)")
+        print("   for the spi group membership to take effect!")
+        
+    except Exception as e:
+        print(f"✗ Failed to set up udev rule: {e}")
+        return
+
+
+def create_service_file():
+    """Create systemd user service file."""
+    print("\nCreating systemd service file...")
+    
+    # Ensure systemd user directory exists
+    SERVICE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    
+    service_content = f"""[Unit]
+Description=LED Feedback Service for Linux Voice Assistant
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory={SCRIPT_DIR}
+ExecStart={VENV_PYTHON} {LED_FEEDBACK_PY}
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
+"""
+    
+    SERVICE_FILE.write_text(service_content)
+    print(f"✓ Service file created: {SERVICE_FILE}")
+
+
+def enable_service():
+    """Enable and start the systemd service."""
+    print("\nEnabling LED feedback service...")
+    try:
+        # Reload systemd
+        subprocess.run(
+            ["systemctl", "--user", "daemon-reload"],
+            check=True,
+            capture_output=True
+        )
+        
+        # Enable service
+        subprocess.run(
+            ["systemctl", "--user", "enable", "led_feedback.service"],
+            check=True,
+            capture_output=True
+        )
+        print("✓ Service enabled")
+        
+        # Start service
+        print("Starting LED feedback service...")
+        subprocess.run(
+            ["systemctl", "--user", "start", "led_feedback.service"],
+            check=True,
+            capture_output=True
+        )
+        print("✓ Service started")
+        
+    except subprocess.CalledProcessError as e:
+        print(f"✗ Failed to enable/start service: {e}")
+        print(e.stderr.decode() if e.stderr else "")
+        sys.exit(1)
+
+
+def check_service_status():
+    """Check and display service status."""
+    print("\nChecking service status...")
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "status", "led_feedback.service", "--no-pager"],
+            capture_output=True,
+            text=True
+        )
+        print(result.stdout)
+    except Exception as e:
+        print(f"Could not check status: {e}")
+
+
+def main():
+    """Main installation routine."""
+    print("=" * 80)
+    print("LED Feedback Service Installation")
+    print("=" * 80)
+    
+    check_spi()
+    check_venv()
+    install_spidev()
+    setup_spi_permissions()
+    create_service_file()
+    enable_service()
+    check_service_status()
+    
+    print("\n" + "=" * 80)
+    print("Installation Complete!")
+    print("=" * 80)
+    print("\nUseful commands:")
+    print("  Status:  systemctl --user status led_feedback.service")
+    print("  Logs:    journalctl --user -u led_feedback.service -f")
+    print("  Restart: systemctl --user restart led_feedback.service")
+    print("  Stop:    systemctl --user stop led_feedback.service")
+    print("  Disable: systemctl --user disable led_feedback.service")
+    print("\nTest patterns:")
+    print(f"  {VENV_PYTHON} {SCRIPT_DIR / 'state_patterns.py'}")
+    print("\nReset LEDs:")
+    print(f"  {VENV_PYTHON} {SCRIPT_DIR / 'led_reset.py'}")
+    print()
+
+
+if __name__ == "__main__":
+    main()

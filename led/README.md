@@ -28,24 +28,54 @@ led_feedback.py follows logs for all LVA instances found in preferences/user/*.s
 Mute state is also read from:
 - /dev/shm/lvas_system_mute (written by the voice assistant)
 
-## Setup and run
+## Quick installation
+Run the automated install script:
+```bash
+led/install
+```
+
+This will:
+- Check for SPI device availability
+- Install the spidev Python package
+- Create and enable the systemd user service
+- Start the LED feedback service
+
+## Manual setup
 1) Enable SPI on your device (Raspberry Pi/Orange Pi tooling or config).
 2) Install spidev in the LVA venv:
    - .venv/bin/pip install spidev
-3) Install the systemd user service:
-   - systemctl --user enable /home/stef/linux-voice-assistant/led/led_feedback.service
+3) Create and install the systemd user service:
+   - led/install (recommended) or manually copy service file
+4) Start the service:
    - systemctl --user start led_feedback.service
 
-To stop or restart:
-- systemctl --user restart led_feedback.service
-- systemctl --user stop led_feedback.service
+## Service management
+- Status:  systemctl --user status led_feedback.service
+- Restart: systemctl --user restart led_feedback.service
+- Stop:    systemctl --user stop led_feedback.service
+- Disable: systemctl --user disable led_feedback.service
+- Logs:    journalctl --user -u led_feedback.service -f
 
 ## Useful commands
-- Live log stream (what the LED service sees):
-  journalctl --user-unit orangepi_1.service --user-unit orangepi_2.service -f -n 0 -o cat
+- **Test LED patterns interactively**:
+  ```bash
+  .venv/bin/python3 led/state_patterns.py
+  ```
 
-- Reset LEDs (all off):
-  python3 /home/stef/linux-voice-assistant/led/led_reset.py
+- **Reset LEDs (turn all off)**:
+  ```bash
+  .venv/bin/python3 led/led_reset.py
+  ```
+
+- **View live log stream** (what the LED service sees):
+  ```bash
+  journalctl --user -u led_feedback.service -f
+  ```
+
+- **Monitor voice assistant events**:
+  ```bash
+  journalctl --user-unit bedroom_va_A.service -f -n 0 -o cat | grep LVA_EVENT
+  ```
 
 ## Notes
 - LED brightness is controlled by BRIGHTNESS in state_patterns.py.
