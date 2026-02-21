@@ -90,6 +90,19 @@ class DeviceManager:
         )
         self.entities.append(self.restart_manager_button)
 
+        self.restart_led_button = ButtonEntity(
+            server=self,  # type: ignore[arg-type]
+            key=len(self.entities),
+            name="Restart LED Service",
+            object_id="led_service_restart",
+            on_press=self._restart_led_service,
+            icon="mdi:restart",
+        )
+        self.entities.append(self.restart_led_button)
+
+        self._led_mqtt_switch: Optional[SwitchEntity] = None
+        self._add_led_mqtt_switch()
+
         self._add_instance_switches()
         self._add_instance_status_sensors()
         self._add_instance_remove_buttons()
@@ -136,6 +149,7 @@ class DeviceManager:
         self._add_instance_remove_buttons()
         self._add_instance_restart_buttons()
         messages.extend(self._refresh_mute_switch())
+        messages.extend(self._refresh_led_mqtt_switch())
 
         if self.protocol is not None:
             self.protocol.send_messages(messages)
@@ -299,12 +313,40 @@ class DeviceManager:
         )
         self.entities.append(self._mute_switch)
 
+    def _add_led_mqtt_switch(self) -> None:
+        if self._led_mqtt_switch is not None:
+            return
+        
+        # Only add switch if MQTT is actually available
+        if not self._is_mqtt_available():
+            return
+        
+        initial = self._read_led_mqtt_enabled()
+        self._led_mqtt_switch = SwitchEntity(
+            server=self,  # type: ignore[arg-type]
+            key=len(self.entities),
+            name="LED MQTT Mode",
+            object_id="led_mqtt_mode",
+            initial_state=initial,
+            on_change=self._set_led_mqtt_enabled,
+            icon="mdi:cloud-outline",
+        )
+        self.entities.append(self._led_mqtt_switch)
+
     def _refresh_mute_switch(self) -> List[message.Message]:
         if self._mute_switch is None:
             return []
         desired = self._read_shared_mute()
         if desired != self._mute_switch.state:
             return [self._mute_switch.set_state(desired)]
+        return []
+
+    def _refresh_led_mqtt_switch(self) -> List[message.Message]:
+        if self._led_mqtt_switch is None:
+            return []
+        desired = self._read_led_mqtt_enabled()
+        if desired != self._led_mqtt_switch.state:
+            return [self._led_mqtt_switch.set_state(desired)]
         return []
 
     def _refresh_instance_switches(self) -> List[message.Message]:
@@ -401,6 +443,70 @@ class DeviceManager:
             )
         except Exception:
             _LOGGER.exception("Failed to restart manager service")
+
+    def _restart_led_service(self) -> None:
+        _LOGGER.info("Restarting LED feedback service")
+        try:
+            subprocess.Popen(
+                ["systemctl", "--user", "restart", "led_feedback.service"]
+            )
+        except Exception:
+            _LOGGER.exception("Failed to restart LED feedback service")
+
+    def _get_led_config_path(self) -> Path:
+        return Path(__file__).parent.parent / "led" / "led_config.json"
+
+    def _is_mqtt_available(self) -> bool:
+        """Check if MQTT is available (paho-mqtt installed and broker configured)."""
+        # Check if paho-mqtt is installed
+        try:
+            import paho.mqtt.client  # noqa: F401
+        except ImportError:
+            _LOGGER.debug("paho-mqtt not installed, LED MQTT switch unavailable")
+            return False
+        
+        # Check if MQTT broker is configured
+        try:
+            config_path = self._get_led_config_path()
+            if not config_path.exists():
+                return False
+            data = _load_json(config_path)
+            mqtt_config = data.get("mqtt", {})
+            broker = mqtt_config.get("broker")
+            if not broker:
+                _LOGGER.debug("MQTT broker not configured, LED MQTT switch unavailable")
+                return False
+            return True
+        except Exception:
+            _LOGGER.debug("Failed to check MQTT availability", exc_info=True)
+            return False
+
+    def _read_led_mqtt_enabled(self) -> bool:
+        try:
+            config_path = self._get_led_config_path()
+            if not config_path.exists():
+                return False
+            data = _load_json(config_path)
+            mqtt_config = data.get("mqtt", {})
+            return mqtt_config.get("enabled", False)
+        except Exception:
+            _LOGGER.debug("Failed to read LED MQTT config", exc_info=True)
+            return False
+
+    def _set_led_mqtt_enabled(self, enabled: bool) -> None:
+        _LOGGER.info("LED MQTT mode changed: %s", enabled)
+        try:
+            config_path = self._get_led_config_path()
+            data = _load_json(config_path)
+            if "mqtt" not in data:
+                data["mqtt"] = {}
+            data["mqtt"]["enabled"] = enabled
+            config_path.write_text(_dump_json(data), encoding="utf-8")
+            _LOGGER.info("Updated LED MQTT mode to %s", enabled)
+            # Restart LED service to apply changes
+            self._restart_led_service()
+        except Exception:
+            _LOGGER.exception("Failed to set LED MQTT mode")
 
     async def _restart_manager_after_delay(self, delay_seconds: float) -> None:
         await asyncio.sleep(delay_seconds)

@@ -1,0 +1,117 @@
+{
+  "hardware": {
+    "num_leds": 8,
+    "spi_bus": 1,
+    "spi_device": 0,
+    "spi_speed_hz": 4000000
+  },
+  "brightness": {
+    "global": 0.2
+  },
+  "colors": {
+    "blue": [0, 0, 50],
+    "green": [0, 50, 0],
+    "red": [50, 0, 0],
+    "purple": [40, 0, 40],
+    "cyan": [0, 50, 50],
+    "yellow": [50, 50, 0],
+    "dim_red": [10, 0, 0],
+    "dim_blue": [0, 0, 20]
+  },
+  "states": {
+    "listening": {
+      "animation": "color_cycle_breathing",
+      "color": "yellow",
+      "brightness_multiplier": 1.0,
+      "animation_params": {
+        "min_brightness": 8,
+        "step_delay": 0.02
+      }
+    },
+    "processing": {
+      "animation": "cylon_bounce",
+      "color": "purple",
+      "brightness_multiplier": 1.0,
+      "animation_params": {
+        "tail": [24, 8, 2],
+        "step_delay": 0.07
+      }
+    },
+    "responding": {
+      "animation": "color_cycle_breathing",
+      "color": "green",
+      "brightness_multiplier": 1.0,
+      "animation_params": {
+        "min_brightness": 8,
+        "step_delay": 0.02
+      }
+    },
+    "voice_stream": {
+      "animation": "color_cycle_breathing",
+      "color": "yellow",
+      "brightness_multiplier": 1.0,
+      "animation_params": {
+        "min_brightness": 8,
+        "step_delay": 0.02
+      }
+    },
+    "idle": {
+      "animation": "listening_inward",
+      "color": "dim_blue",
+      "brightness_multiplier": 1,
+      "animation_params": {
+        "step_delay": 0.12,
+        "hold_delay": 0.1
+      }
+    },
+    "muted": {
+      "animation": "listening_inward",
+      "color": "dim_red",
+      "brightness_multiplier": 1,
+      "animation_params": {
+        "step_delay": 0.12,
+        "hold_delay": 0.1
+      }
+    },
+    "startup": {
+      "animation": "color_cycle_breathing",
+      "color": "blue",
+      "brightness_multiplier": 1.0,
+      "animation_params": {
+        "min_brightness": 8,
+        "step_delay": 0.02,
+        "duration_seconds": 2.0
+      }
+    },
+    "error": {
+      "animation": "solid_color",
+      "color": "red",
+      "brightness_multiplier": 1.0,
+      "animation_params": {}
+    },
+    "off": {
+      "animation": "all_off",
+      "color": null,
+      "brightness_multiplier": 0.0,
+      "animation_params": {}
+    }
+  },
+  "events": {
+    "VOICE_ASSISTANT_RUN_START": "voice_stream",
+    "VOICE_ASSISTANT_INTENT_START": "processing",
+    "VOICE_ASSISTANT_TTS_START": "responding",
+    "TTS_RESPONSE_FINISHED": "listening",
+    "STARTUP": "startup",
+    "ERROR": "error"
+  },
+  "mqtt": {
+    "enabled": false,
+    "broker": "192.168.1.100",
+    "port": 1883,
+    "username": "mqtt_user",
+    "password": "mqtt_password",
+    "topic_prefix": "nodes",
+    "state_topic_suffix": "va/state",
+    "mute_topic_suffix": "va/manager_mute"
+  }
+}

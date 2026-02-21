@@ -60,6 +60,23 @@ def install_spidev():
         sys.exit(1)
 
 
+def install_paho_mqtt():
+    """Install paho-mqtt Python package in venv (for MQTT mode)."""
+    print("\nInstalling paho-mqtt package (for MQTT mode)...")
+    try:
+        subprocess.run(
+            [str(VENV_PIP), "install", "paho-mqtt"],
+            check=True,
+            capture_output=True
+        )
+        print("✓ paho-mqtt installed")
+    except subprocess.CalledProcessError as e:
+        print(f"⚠️  paho-mqtt installation failed: {e}")
+        print("    LED service will work in journalctl fallback mode")
+        print("    To enable MQTT mode later, run:")
+        print(f"    {VENV_PIP} install paho-mqtt")
+
+
 def setup_spi_permissions():
     """Set up SPI device permissions via udev rule and spi group."""
     print("\nConfiguring SPI device permissions...")
@@ -138,6 +155,31 @@ SUBSYSTEM=="spidev", GROUP="spi", MODE="0660"
     except Exception as e:
         print(f"✗ Failed to set up udev rule: {e}")
         return
+
+
+def initialize_config():
+    """Initialize LED config from example if not present."""
+    config_path = SCRIPT_DIR / "led_config.json"
+    config_example_path = SCRIPT_DIR / "led_config.json.example"
+    
+    if config_path.exists():
+        print(f"\n✓ LED config exists: {config_path}")
+        return
+    
+    print("\nInitializing LED config from example...")
+    if not config_example_path.exists():
+        print(f"⚠️  Example config not found: {config_example_path}")
+        print("   The service will use default settings.")
+        return
+    
+    try:
+        config_text = config_example_path.read_text()
+        config_path.write_text(config_text)
+        print(f"✓ Created {config_path} from example")
+        print(f"  Please edit {config_path} to configure MQTT settings")
+    except Exception as e:
+        print(f"⚠️  Failed to initialize config: {e}")
+        print("   The service will use example config settings.")
 
 
 def create_service_file():
@@ -225,7 +267,9 @@ def main():
     check_spi()
     check_venv()
     install_spidev()
+    install_paho_mqtt()
     setup_spi_permissions()
+    initialize_config()
     create_service_file()
     enable_service()
     check_service_status()
@@ -233,6 +277,8 @@ def main():
     print("\n" + "=" * 80)
     print("Installation Complete!")
     print("=" * 80)
+    print("\nConfiguration:")
+    print("  Edit led/led_config.json to configure MQTT broker or customize LED behavior")
     print("\nUseful commands:")
     print("  Status:  systemctl --user status led_feedback.service")
     print("  Logs:    journalctl --user -u led_feedback.service -f")
@@ -243,6 +289,8 @@ def main():
     print(f"  {VENV_PYTHON} {SCRIPT_DIR / 'state_patterns.py'}")
     print("\nReset LEDs:")
     print(f"  {VENV_PYTHON} {SCRIPT_DIR / 'led_reset.py'}")
+    print("\nHA Integration:")
+    print("  See led/README.md for MQTT setup and Home Assistant automation configuration")
     print()
 
 

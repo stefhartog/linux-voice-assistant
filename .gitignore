@@ -21,6 +21,9 @@ venv/
 /preferences/user/
 /local/
 
+# Ignore personal LED config (contain MQTT credentials)
+/led/led_config.json
+
 
 # Ignore Copilot instructions (local helper file)
 .github/copilot-instructions.md
