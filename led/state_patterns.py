@@ -6,8 +6,9 @@ import spidev
 import time
 import math
 import json
-import os
 from pathlib import Path
+from typing import Optional, Union, List, Tuple, Dict, Any
+import threading
 
 # Load configuration
 CONFIG_PATH = Path(__file__).parent / "led_config.json"
@@ -41,11 +42,22 @@ SPI_DEVICE = HARDWARE.get("spi_device", 0)
 SPI_SPEED = HARDWARE.get("spi_speed_hz", 4000000)
 
 spi = spidev.SpiDev()
-spi.open(SPI_BUS, SPI_DEVICE)
-spi.max_speed_hz = SPI_SPEED
+try:
+    spi.open(SPI_BUS, SPI_DEVICE)
+    spi.max_speed_hz = SPI_SPEED
+except FileNotFoundError:
+    raise RuntimeError(
+        f"SPI device /dev/spidev{SPI_BUS}.{SPI_DEVICE} not found. "
+        f"Is SPI enabled? Check hardware config in led_config.json"
+    )
+except PermissionError:
+    raise RuntimeError(
+        f"Permission denied accessing /dev/spidev{SPI_BUS}.{SPI_DEVICE}. "
+        f"Run 'sudo usermod -aG spi $USER' or check udev rules."
+    )
 
 
-def resolve_color(color_spec):
+def resolve_color(color_spec: Union[str, List[int], Tuple[int, int, int]]) -> Tuple[int, int, int]:
     """Resolve a color name or RGB tuple to RGB values.
     
     Args:
@@ -64,7 +76,7 @@ def resolve_color(color_spec):
         raise ValueError(f"Invalid color spec: {color_spec}")
 
 
-def get_state_config(state_name):
+def get_state_config(state_name: str) -> Optional[Dict[str, Any]]:
     """Get animation config for a named state.
     
     Args:
@@ -77,7 +89,7 @@ def get_state_config(state_name):
         raise ValueError(f"Unknown state: {state_name}. Available: {list(STATES_MAP.keys())}")
     return STATES_MAP[state_name]
 
-def send_colors(colors):
+def send_colors(colors: List[Tuple[int, int, int]]) -> None:
     """Send RGB colors to WS2812 LEDs via SPI.
     
     Args:
@@ -95,17 +107,17 @@ def send_colors(colors):
                 tx_data.append(0xE0 if (val << i) & 0x80 else 0x80)
     spi.xfer2(tx_data)
 
-def all_off():
+def all_off() -> None:
     send_colors([(0, 0, 0)] * NUM_LEDS)
 
-def all_off_stoppable(stop_event=None):
+def all_off_stoppable(stop_event: Optional[threading.Event] = None) -> None:
     all_off()
     # Wait until stop_event is set, so thread can be joined cleanly
     while not (stop_event and stop_event.is_set()):
         time.sleep(0.05)
 
 # --- Pattern Functions (continuous, blocking) ---
-def cylon_bounce(stop_event=None, color=None, **kwargs):
+def cylon_bounce(stop_event: Optional[threading.Event] = None, color: Optional[Union[str, List[int]]] = None, **kwargs) -> None:
     """Cylon bounce animation.
     
     Args:
@@ -138,7 +150,7 @@ def cylon_bounce(stop_event=None, color=None, **kwargs):
     except KeyboardInterrupt:
         all_off()
 
-def pulse_wave(stop_event=None, color=None, **kwargs):
+def pulse_wave(stop_event: Optional[threading.Event] = None, color: Optional[Union[str, List[int]]] = None, **kwargs) -> None:
     """Pulsing wave animation.
     
     Args:
@@ -170,7 +182,7 @@ def pulse_wave(stop_event=None, color=None, **kwargs):
         all_off()
 
 
-def solid_color(stop_event=None, color=None, **kwargs):
+def solid_color(stop_event: Optional[threading.Event] = None, color: Optional[Union[str, List[int]]] = None, **kwargs) -> None:
     """Solid color display.
     
     Args:
@@ -191,7 +203,7 @@ def solid_color(stop_event=None, color=None, **kwargs):
     except KeyboardInterrupt:
         all_off()
 
-def color_cycle_breathing(stop_event=None, color=None, min_brightness=8, step_delay=0.02, **kwargs):
+def color_cycle_breathing(stop_event: Optional[threading.Event] = None, color: Optional[Union[str, List[int]]] = None, min_brightness: int = 8, step_delay: float = 0.02, **kwargs) -> None:
     """Color breathing animation.
     
     Args:
@@ -224,7 +236,7 @@ def color_cycle_breathing(stop_event=None, color=None, min_brightness=8, step_de
         all_off()
 
 
-def listening_inward(stop_event=None, color=None, step_delay=None, hold_delay=None, **kwargs):
+def listening_inward(stop_event: Optional[threading.Event] = None, color: Optional[Union[str, List[int]]] = None, step_delay: Optional[float] = None, hold_delay: Optional[float] = None, **kwargs) -> None:
     """Inward sweep to center animation.
     
     Args:
@@ -264,7 +276,7 @@ def listening_inward(stop_event=None, color=None, step_delay=None, hold_delay=No
     except KeyboardInterrupt:
         all_off()
 
-def play_state_animation(state_name, stop_event=None):
+def play_state_animation(state_name: str, stop_event: Optional[threading.Event] = None) -> None:
     """Play animation for a named state (e.g., "listening", "processing").
     
     Useful for other scripts to trigger LED patterns by state name.
@@ -307,7 +319,7 @@ def play_state_animation(state_name, stop_event=None):
         anim_func(stop_event=stop_event, color=color, **params)
 
 
-def get_event_animation(event_name, stop_event=None):
+def get_event_animation(event_name: str, stop_event: Optional[threading.Event] = None) -> None:
     """Get animation function for a journal event.
     
     Args:

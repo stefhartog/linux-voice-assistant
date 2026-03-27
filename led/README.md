@@ -176,6 +176,8 @@ All LED behavior (colors, animations, timing, MQTT settings) is configured in `l
 - **events**: Maps LVA_EVENT names to state animations (fallback mode only)
 - **mqtt**: MQTT broker configuration and topic settings
 
+For detailed configuration reference and customization guide, see [LED_CONFIG_README.md](LED_CONFIG_README.md).
+
 ## Notes
 - LED brightness is controlled by the `brightness` section in `led_config.json`
 - LED 0 is taped off (black prepended so LEDs 1-7 are active/centered)

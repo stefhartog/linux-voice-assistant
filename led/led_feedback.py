@@ -7,6 +7,7 @@ Fallback to journalctl if MQTT is unavailable or unconfigured.
 
 In MQTT mode, also monitors journalctl for special events like "wakeword triggered while muted".
 """
+import glob
 import json
 import logging
 import os
@@ -53,17 +54,8 @@ current_stop_events = {}  # area -> threading.Event
 animation_locks = {}
 area_mute_state = {}  # area -> bool (True if muted)
 
-
-def _discover_lva_services():
-    """Discover LVA services from preferences/user/ directory."""
-    import glob
-    pref_user_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "preferences", "user")
-    services = [
-        os.path.basename(f).replace(".service", "") 
-        for f in glob.glob(os.path.join(pref_user_dir, "*.service"))
-        if not f.endswith("_manager.service")  # Exclude manager service
-    ]
-    return services
+# Constants
+ANIMATION_STOP_TIMEOUT = 0.5  # seconds to wait for animation thread to stop
 
 
 def _monitor_wakeword_events(stop_event: threading.Event):
@@ -72,8 +64,6 @@ def _monitor_wakeword_events(stop_event: threading.Event):
     Runs in a background thread alongside MQTT mode.
     """
     try:
-        import glob
-        
         pref_user_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "preferences", "user")
         lva_services = [
             os.path.basename(f) 
@@ -149,7 +139,7 @@ def _stop_animation_unlocked(area: str) -> None:
     if area in current_animations:
         thread = current_animations[area]
         if thread and thread.is_alive():
-            thread.join(timeout=0.5)
+            thread.join(timeout=ANIMATION_STOP_TIMEOUT)
         current_animations[area] = None
     if area in current_stop_events:
         del current_stop_events[area]
