@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "alarm-brain"
+version = "0.1.0"
+description = "Standalone local alarm scheduler with JSON persistence and MQTT control"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "paho-mqtt>=1.6,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0",
+]
+
+[project.scripts]
+alarm-brain = "alarm_brain.cli:main"

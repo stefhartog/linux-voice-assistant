@@ -317,6 +317,10 @@ class VoiceSatelliteProtocol(APIServer):
         event_type: VoiceAssistantTimerEventType,
         msg: VoiceAssistantTimerEventResponse,
     ) -> None:
+        if not self.state.timers_enabled:
+            _LOGGER.debug("Ignoring timer event because timers are disabled")
+            return
+
         _LOGGER.debug("Timer event: type=%s", event_type.name)
         if event_type == VoiceAssistantTimerEventType.VOICE_ASSISTANT_TIMER_FINISHED:
             if not self._timer_finished:
@@ -356,17 +360,20 @@ class VoiceSatelliteProtocol(APIServer):
         elif isinstance(msg, VoiceAssistantTimerEventResponse):
             self.handle_timer_event(VoiceAssistantTimerEventType(msg.event_type), msg)
         elif isinstance(msg, DeviceInfoRequest):
+            feature_flags = (
+                VoiceAssistantFeature.VOICE_ASSISTANT
+                | VoiceAssistantFeature.API_AUDIO
+                | VoiceAssistantFeature.ANNOUNCE
+                | VoiceAssistantFeature.START_CONVERSATION
+            )
+            if self.state.timers_enabled:
+                feature_flags |= VoiceAssistantFeature.TIMERS
+
             yield DeviceInfoResponse(
                 uses_password=False,
                 name=self.state.name,
                 mac_address=self.state.mac_address,
-                voice_assistant_feature_flags=(
-                    VoiceAssistantFeature.VOICE_ASSISTANT
-                    | VoiceAssistantFeature.API_AUDIO
-                    | VoiceAssistantFeature.ANNOUNCE
-                    | VoiceAssistantFeature.START_CONVERSATION
-                    | VoiceAssistantFeature.TIMERS
-                ),
+                voice_assistant_feature_flags=feature_flags,
             )
         elif isinstance(
             msg,

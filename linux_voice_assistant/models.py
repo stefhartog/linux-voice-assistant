@@ -100,6 +100,7 @@ class ServerState:
     refractory_seconds: float = 2.0
     screen_management: int = 0
     disable_wakeword_during_tts: bool = False
+    timers_enabled: bool = True
     software_mute: bool = False
     shared_mute_path: Path = Path("/dev/shm/lvas_system_mute")
 

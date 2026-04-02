@@ -118,6 +118,19 @@ async def main() -> None:
         action="store_true",
         help="Disable wake word detection while TTS is playing (reduces false triggers)",
     )
+    parser.add_argument(
+        "--disable-timers",
+        dest="disable_timers",
+        action="store_true",
+        default=True,
+        help="Disable voice assistant timer support (non-destructive)",
+    )
+    parser.add_argument(
+        "--enable-timers",
+        dest="disable_timers",
+        action="store_false",
+        help="Enable voice assistant timer support",
+    )
     
     # Parse only --name first to load CLI config defaults
     args, remaining = parser.parse_known_args()
@@ -439,6 +452,7 @@ async def main() -> None:
         refractory_seconds=args.refractory_seconds,
         screen_management=args.screen_management,
         disable_wakeword_during_tts=args.disable_wakeword_during_tts,
+        timers_enabled=not args.disable_timers,
         software_mute=False,
     )
 
