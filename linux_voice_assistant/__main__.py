@@ -122,7 +122,7 @@ async def main() -> None:
         "--disable-timers",
         dest="disable_timers",
         action="store_true",
-        default=True,
+        default=False,
         help="Disable voice assistant timer support (non-destructive)",
     )
     parser.add_argument(
